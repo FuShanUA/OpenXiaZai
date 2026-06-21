@@ -5,4 +5,5 @@ venv/
 .venv/
 *.torrent
 .aria2_dht.dat
-records.json.aria2_session
+records.json
+.aria2_session
