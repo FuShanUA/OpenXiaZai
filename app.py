@@ -435,7 +435,14 @@ class Engine:
             "--seed-time=0",
             "--rpc-max-request-size=20M",
             "--bt-remove-unselected-file=true",
+            # Session persistence - survive restarts
+            "--save-session=" + os.path.join(BASE_DIR, ".aria2_session"),
+            "--save-session-interval=30",
         ]
+        # Restore previous session if it exists
+        session_file = os.path.join(BASE_DIR, ".aria2_session")
+        if os.path.exists(session_file):
+            args.append("--input-file=" + session_file)
         # Add DHT entry points as separate args
         for ep in DHT_ENTRY_POINTS:
             args.append("--dht-entry-point=" + ep)
@@ -547,16 +554,12 @@ class Engine:
         return {"ok": True, "gid": gid, "type": t, "existing_files": existing_files}
 
     def _check_existing_files(self, info_hash):
-        """Check if files for this torrent already exist in the download directory."""
+        """Check if files for this torrent exist and are still being downloaded."""
         existing = []
         try:
-            torrent_path = os.path.join(self.save_path, info_hash + ".torrent")
-            if os.path.exists(torrent_path):
-                existing.append({"name": info_hash + ".torrent", "size": os.path.getsize(torrent_path)})
-            # Also check for any .aria2 control files that indicate a previous download
+            # Only warn about files that are still being downloaded (.aria2 control file exists)
             for fn in os.listdir(self.save_path):
                 if fn.endswith(".aria2"):
-                    fp = os.path.join(self.save_path, fn)
                     main_fp = os.path.join(self.save_path, fn[:-6])
                     if os.path.exists(main_fp):
                         existing.append({"name": fn[:-6], "size": os.path.getsize(main_fp)})
