@@ -31,8 +31,8 @@ input[type=text]:focus{border-color:var(--accent)}
 .btn.primary:hover{background:#3d8bed}
 .btn.go{background:var(--accent2);border-color:var(--accent2);color:#04150a}
 .btn.warn{background:var(--warn);border-color:var(--warn);color:#2a1a00}
-.btn.danger{border-color:#4a2a2a;color:var(--danger);background:transparent}
-.btn.danger:hover{background:#2a1717}
+.btn.danger{border-color:var(--border);background:var(--panel2);color:var(--danger)}
+.btn.danger:hover{background:rgba(255,92,92,.12)}
 .btn.sm{padding:5px 10px;font-size:12px}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -41,8 +41,8 @@ input[type=text]:focus{border-color:var(--accent)}
   border:1px solid var(--border);color:var(--accent)}
 .badge.torrent{color:#c9a3ff}.badge.http{color:#4f9dff}.badge.ftp{color:#34c759}
 .badge.unsup{color:var(--warn)}
-.badge.m3u8{color:#ff5c5c}
-.badge.direct{color:#ff5c5c}
+.badge.m3u8{color:#c9a3ff}
+.badge.direct{color:#c9a3ff}
 /* tabs */
 .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
 .tab{padding:8px 16px;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;
@@ -155,7 +155,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="card">
     <div class="row">
       <div style="position:relative;flex:1">
-        <input type="text" id="url" placeholder="粘贴链接：magnet:、ed2k://、http(s)://、ftp://、夸克网盘…" style="flex:1;padding-right:28px">
+        <input type="text" id="url" placeholder="粘贴链接：magnet:、http(s)://、ftp://…" style="flex:1;padding-right:28px">
         <button id="clearUrlBtn" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px 6px;display:none;line-height:1" title="清空">✕</button>
       </div>
       <button class="btn sm" id="menuBtn" title="更多操作">⋮</button>
@@ -175,7 +175,8 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       </div>
     </div>
     <div class="row" style="margin-top:12px;gap:8px">
-      <button class="btn go" id="cxDownload">下载视频</button>
+      <button class="btn go" id="cxDownload">立即下载</button>
+      <button class="btn" id="cxQueue">加入队列</button>
       <button class="btn" id="cxCancel">取消</button>
     </div>
   </div>
@@ -189,7 +190,11 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div id="pane-tasks"></div>
   <div id="pane-history" style="display:none"></div>
   <div id="pane-trash" style="display:none"></div>
-  <div class="clear-bar" id="clearTasks" style="display:none"><button class="btn sm go" id="resumeAllBtn">开始全部任务</button><button class="btn sm danger" id="clearTasksBtn">停止全部任务</button></div>
+  <div class="clear-bar" id="clearTasks" style="display:none">
+    <button class="btn sm go" id="resumeAllBtn">全部开始</button>
+    <button class="btn sm warn" id="pauseAllBtn">全部暂停</button>
+    <button class="btn sm danger" id="deleteAllBtn">全部删除</button>
+  </div>
   <div class="clear-bar" id="clearHist" style="display:none"><button class="btn sm danger" id="clearHistBtn">移至回收站</button></div>
   <div class="clear-bar" id="clearTrash" style="display:none"><button class="btn sm danger" id="clearTrashBtn">清空回收站</button><button class="btn sm danger" id="clearTrashFilesBtn" style="margin-left:6px">清空回收站并删除文件</button></div>
 </div>
@@ -257,7 +262,9 @@ let activeTab='tasks';
 let cur=null;
 const openFiles=new Set();  // track which task file lists are expanded
 const fmtB=b=>{if(!b)return '0 B';const u=['B','KB','MB','GB','TB'];let i=0,v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+' '+u[i]};
-const fmtR=b=>b>0?'↓ '+fmtB(b)+'/s':'';
+const fmtR=b=>'↓ '+(b>0?fmtB(b)+'/s':'--');
+const fmtTime=s=>{if(s<60)return s+'秒';if(s<3600)return Math.floor(s/60)+'分'+Math.round(s%60)+'秒';const h=Math.floor(s/3600),m=Math.round((s%3600)/60);return h+'时'+m+'分'};
+const fmtETA=(pct,elapsed)=>{if(pct<=0||pct>=100)return'';const total=elapsed/pct*100;const remain=Math.max(0,total-elapsed);if(remain<60)return remain.toFixed(0)+'秒';if(remain<3600)return Math.floor(remain/60)+'分'+Math.round(remain%60)+'秒';const h=Math.floor(remain/3600),m=Math.round((remain%3600)/60);return h+'时'+m+'分'};
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});if(!r.ok)throw new Error('HTTP '+r.status);return await r.json()}catch(e){console.error('POST '+u+' failed:',e);return{ok:false,error:'请求失败: '+e.message}}}
 function esc(s){return (s||'').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}
 
@@ -312,14 +319,14 @@ $('url').addEventListener('input',()=>{
 });
 
 // 判断 URL 是否为直接文件下载（不走视频提取）
+// 只保留二进制/压缩格式；文本/网页类（html/json/txt等）统一走解析流程
 function isDirectFileDownload(url){
   const dlExts=['.zip','.rar','.7z','.tar.gz','.tar.bz2','.tar.xz','.gz','.bz2',
     '.pdf','.dmg','.iso','.exe','.apk','.ipa','.deb','.rpm',
     '.doc','.docx','.xls','.xlsx','.ppt','.pptx',
-    '.txt','.csv','.json','.xml','.html','.htm',
     '.jpg','.jpeg','.png','.gif','.webp','.svg','.ico',
     '.mp3','.flac','.wav','.aac','.ogg','.wma','.m4a',
-    '.torrent','.css','.js','.py','.sh','.rb','.go','.java','.c','.cpp'];
+    '.torrent'];
   const ext=url.toLowerCase().split('?')[0].split('#')[0];
   return dlExts.some(e=>ext.endsWith(e));
 }
@@ -329,25 +336,32 @@ $('addBtn').onclick=async()=>{
   if(!url){return}
   const v=url.toLowerCase();
 
+  // 不支持的类型：提前拦截，给出明确提示
+  if(v.includes('quark.cn')){
+    await customAlert('夸克网盘链接需要先在浏览器中转存到自己的网盘，再获取直链下载。',{title:'暂不支持夸克网盘'});
+    return;
+  }
+  if(v.startsWith('ed2k')){
+    await customAlert('电驴(eD2k)链接需要专用的 eMule/aMule 客户端，本工具无法下载。',{title:'暂不支持电驴'});
+    return;
+  }
+  if(v.startsWith('thunder')){
+    await customAlert('迅雷链接请用迅雷客户端下载，或转换为磁力/直链后使用。',{title:'暂不支持迅雷'});
+    return;
+  }
+
   // HTTP 网页链接：尝试提取视频
   if(v.startsWith('http')&&!isDirectFileDownload(v)){
-    // 直接视频链接 → 走 m3u8 下载
-    if(/\.m3u8($|\?)/.test(v)||/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v)){
-      $('addBtn').disabled=true;$('addBtn').textContent='添加中…';
-      try{
-        const name=url.split('/').pop().split('?')[0]||'视频';
-        const res=await post('/api/download_m3u8',{url,title:name});
-        if(!res||res.ok===false){await customAlert(res?.error||'添加失败');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
-        $('url').value='';$('typeHint').style.display='none';
-        switchTab('tasks');
-      }catch(e){await customAlert('添加失败: '+e.message)}
-      $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
-      return;
-    }
-
-    // 网页链接：尝试通用视频提取
     $('addBtn').disabled=true;$('addBtn').textContent='解析中…';
     try{
+      // 直接视频链接 → 先预览确认，不自动下载
+      if(/\.m3u8($|\?)/.test(v)||/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v)){
+        const name=url.split('/').pop().split('?')[0]||'视频';
+        showCxPreview({ok:true,title:name,m3u8_url:url,poster:'',magnet:'',type:'direct'});
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      // 网页链接：尝试通用视频提取
       const res=await post('/api/parse',{url});
       if(!res||res.ok===false){
         await customAlert('未解析出可下载内容');
@@ -463,30 +477,31 @@ document.addEventListener('keydown',e=>{
   if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
   if($('cxPreview').style.display==='block'){hideCxPreview();return}
   const gids=Object.keys(modalStates);
-  if(gids.length>0){cancelModal(gids[gids.length-1])}
+  if(gids.length>0){cancelModal(gids[gids.length-1],true)}
 });
 
-// ---- 剪贴板监听（paste 事件 + 轮询 + focus） ----
+// ---- 剪贴板监听（仅自动粘贴到输入框，不自动下载） ----
 (function(){
   let autoCooldown=false;
   let lastText='';
+  let lastDetectionTime=0;
   const LINK_RE=/^(magnet:|https?:\/\/|ftp:\/\/|sftp:\/\/|ed2k:\/\/|thunder:\/\/)/i;
+  const CLIPBOARD_WINDOW_MS=30000;  // 30秒内复制的链接才响应
 
-  function tryAutoDownload(text){
-    if(autoCooldown)return;
+  function tryAutoPaste(text, force){
+    if(!force&&autoCooldown)return;
     const t=(text||'').trim();
     if(!t||!LINK_RE.test(t))return;
-    if(t===lastText)return;
     if(Object.keys(modalStates).length>0)return;
     if($('cxPreview').style.display==='block')return;
     if($('confirmOverlay').style.display==='flex')return;
     if(document.activeElement===$('url')&&$('url').value===t)return;
+    if(t===lastText)return;
     lastText=t;
     $('url').value=t;
     $('url').dispatchEvent(new Event('input'));
-    $('addBtn').click();
-    autoCooldown=true;
-    setTimeout(()=>{autoCooldown=false},3000);
+    $('url').focus();
+    if(!force){autoCooldown=true;setTimeout(()=>{autoCooldown=false},3000)}
   }
 
   // 读取剪贴板：优先浏览器 API，回退后端系统命令
@@ -499,22 +514,31 @@ document.addEventListener('keydown',e=>{
   // 轮询剪贴板（独立应用 WKWebView 中 clipboard API 不可用）
   async function poll(){
     if(autoCooldown)return;
-    try{const t=await readClipboard();if(t)tryAutoDownload(t)}catch(e){}
+    try{
+      const t=await readClipboard();
+      if(t&&t.trim()!==lastText){lastDetectionTime=Date.now();tryAutoPaste(t)}
+    }catch(e){}
   }
-  poll();
+  // 启动后延迟 2 秒再开始轮询，不在启动时检查现有剪贴板
   setInterval(poll,2000);
 
-  // 全局 paste 事件
+  // 全局 paste 事件（用户主动粘贴，始终响应）
   document.addEventListener('paste',e=>{
     if(document.activeElement===$('url'))return;
     const text=(e.clipboardData||window.clipboardData).getData('text');
-    tryAutoDownload(text);
+    lastDetectionTime=Date.now();
+    tryAutoPaste(text,true);
   });
 
-  // 窗口获得焦点时立即检查
+  // 窗口获得焦点时检查 —— 仅响应时间窗口内的剪贴板内容
   window.addEventListener('focus',async()=>{
     if(autoCooldown)return;
-    try{const t=await readClipboard();if(t)tryAutoDownload(t)}catch(e){}
+    try{
+      const t=await readClipboard();
+      if(!t||!t.trim())return;
+      const elapsed=Date.now()-lastDetectionTime;
+      if(elapsed<CLIPBOARD_WINDOW_MS)tryAutoPaste(t);
+    }catch(e){}
   });
 })();
 
@@ -526,25 +550,39 @@ let cxData=null;
 function showCxPreview(data){
   cxData=data;
   $('cxTitle').textContent=data.title||'未知影片';
-  $('cxM3u8').textContent='视频源: '+(data.m3u8_url||'');
-  if(data.magnet){$('cxMagnet').textContent='磁力: '+data.magnet;$('cxMagnet').style.display=''}
-  else{$('cxMagnet').style.display='none'}
+  if(data.magnet&&!data.m3u8_url){
+    $('cxM3u8').textContent='';
+    $('cxMagnet').textContent='磁力: '+data.magnet;$('cxMagnet').style.display='';
+  }else{
+    $('cxM3u8').textContent='视频源: '+(data.m3u8_url||'');
+    if(data.magnet){$('cxMagnet').textContent='磁力: '+data.magnet;$('cxMagnet').style.display=''}
+    else{$('cxMagnet').style.display='none'}
+  }
   if(data.poster){$('cxPoster').src=data.poster;$('cxPoster').style.display=''}
   else{$('cxPoster').style.display='none'}
   $('cxPreview').style.display='block';
   $('url').value='';$('typeHint').style.display='none';
 }
 function hideCxPreview(){cxData=null;$('cxPreview').style.display='none';$('url').value=''}
-$('cxDownload').onclick=async()=>{
+async function doCxAdd(action){
   if(!cxData)return;
-  $('cxDownload').disabled=true;$('cxDownload').textContent='添加中…';
-  try{
-    const res=await post('/api/download_m3u8',{url:cxData.m3u8_url,title:cxData.title});
+  const dl=action==='download';
+  if(cxData.type==='torrent'&&cxData.magnet&&!cxData.m3u8_url){
+    const res=await post('/api/add',{url:cxData.magnet});
+    if(res&&res.ok){
+      hideCxPreview();
+      if(res.type==='torrent'){showFileModal(res.gid)}
+      else{switchTab('tasks')}
+    }else{await customAlert(res?.error||'添加失败');return false}
+  }else{
+    const res=await post('/api/download_m3u8',{url:cxData.m3u8_url,title:cxData.title,paused:!dl});
     if(res&&res.ok){hideCxPreview();switchTab('tasks')}
-    else{await customAlert(res?.error||'下载失败')}
-  }catch(e){await customAlert('下载失败: '+e.message)}
-  $('cxDownload').disabled=false;$('cxDownload').textContent='下载视频';
-};
+    else{await customAlert(res?.error||'下载失败');return false}
+  }
+  return true;
+}
+$('cxDownload').onclick=async()=>{await doCxAdd('download')};
+$('cxQueue').onclick=async()=>{await doCxAdd('queue')};
 $('cxCancel').onclick=hideCxPreview;
 
 // ---- file selection modal (multi, draggable, stackable) ----
@@ -558,8 +596,8 @@ function closeModal(gid){
   if(st.overlay&&st.overlay.parentNode)st.overlay.parentNode.removeChild(st.overlay);
   delete modalStates[gid];
 }
-function cancelModal(gid){
-  if(gid){post('/api/stop',{gid:gid})}
+function cancelModal(gid, skipTrash){
+  if(gid){post('/api/stop',{gid:gid,skip_trash:!!skipTrash})}
   closeModal(gid);
 }
 
@@ -573,7 +611,7 @@ async function showFileModal(gid){
   overlay.setAttribute('data-gid',gid);
   overlay.querySelector('.modal-title').textContent='新建BT任务';
   overlay.querySelector('.modal-body').innerHTML='<div class="info-text"><span class="spinner"></span>正在获取种子元数据…</div>';
-  overlay.querySelector('.modal-foot').innerHTML='<button class="btn sm" onclick="cancelModal(\''+gid+'\')">取消</button>';
+  overlay.querySelector('.modal-foot').innerHTML='<button class="btn sm" onclick="cancelModal(\''+gid+'\',true)">取消</button>';
 
   // Drag support
   let dragging=false,dx=0,dy=0;
@@ -606,6 +644,13 @@ function pollModalFiles(gid){
       const t=(s.pending||[]).find(t=>t.gid===gid)||s.tasks.find(t=>t.gid===gid);
       if(t&&t.has_metadata&&t.files&&t.files.length>0){renderFilePicker(gid,t);return}
       const elapsed=Math.round((Date.now()-(st.startTime||Date.now()))/1000);
+      // 90 秒超时：自动中止，跳过回收站，不保留磁盘文件
+      if(elapsed>90){
+        const st3=modalStates[gid];if(!st3)return;
+        st3.overlay.querySelector('.modal-body').innerHTML='<div class="info-text" style="color:var(--danger)"><b>解析超时</b>（90 秒）<br><br>种子可能已失效或缺少做种者，请尝试其他链接。</div>';
+        st3.overlay.querySelector('.modal-foot').innerHTML='<button class="btn sm" onclick="cancelModal(\''+gid+'\',true)">关闭</button>';
+        return;
+      }
       let info='<span class="spinner"></span>正在获取种子元数据…';
       if(t&&t.metadata_progress){info+='（'+t.metadata_progress+'%）'}
       info+='<br><span style="font-size:12px;opacity:.7">节点：'+(t?t.peers:0)+' · 用时 '+elapsed+' 秒</span>';
@@ -653,7 +698,7 @@ function renderFilePicker(gid, t){
   summaryHtml+='</div>';
   // Actions
   let actionHtml='<div class="picker-actions">';
-  actionHtml+='<button class="btn sm" onclick="cancelModal(\''+gid+'\')">取消</button>';
+  actionHtml+='<button class="btn sm" onclick="cancelModal(\''+gid+'\',true)">取消</button>';
   actionHtml+='<button class="btn warn" id="mQueue_'+gid+'">添加到队列</button>';
   actionHtml+='<button class="btn go" id="mDownload_'+gid+'">立即下载</button>';
   actionHtml+='</div>';
@@ -711,16 +756,27 @@ $('chooseDir').onclick=async()=>{
   if(res&&res.ok){$('dest').textContent=res.path}
 };
 
-// Clear all buttons
+// Global task buttons
 $('resumeAllBtn').onclick=async()=>{
   if(!cur||!cur.tasks)return;
   for(const t of cur.tasks){
     if(t.state==='paused')await post('/api/resume',{gid:t.gid});
   }
 };
-$('clearTasksBtn').onclick=async()=>{
-  if(!await customConfirm('确定要暂停全部下载任务吗？',{danger:true}))return;
-  await post('/api/clear_tasks');
+$('pauseAllBtn').onclick=async()=>{
+  if(!cur||!cur.tasks)return;
+  if(!await customConfirm('确定要暂停全部任务吗？',{title:'全部暂停'}))return;
+  for(const t of cur.tasks){
+    if(t.state==='downloading'||t.state==='fetching'||t.state==='queued')
+      await post('/api/pause',{gid:t.gid});
+  }
+};
+$('deleteAllBtn').onclick=async()=>{
+  if(!cur||!cur.tasks.length)return;
+  if(!await customConfirm('确定要删除全部下载任务吗？任务将移至回收站。',{danger:true}))return;
+  for(const t of [...cur.tasks]){
+    await post('/api/stop',{gid:t.gid});
+  }
 };
 $('clearHistBtn').onclick=async()=>{
   if(!await customConfirm('确定要将全部下载记录移至回收站吗？',{danger:true}))return;
@@ -748,16 +804,22 @@ function tBtn(label,cls,fn){const b=document.createElement('button');b.className
 
 function renderTask(t){
   const el=document.createElement('div');el.className='task';
+  const now=Date.now()/1000;
+  const elapsed=t.added_at?Math.round(now-t.added_at):0;
+  const timeInfo=(t.added_at&&(t.state==='downloading'||t.state==='fetching'||t.state==='queued'))?
+    '<span>⏱ '+fmtTime(elapsed)+'</span>'+(t.progress>0?'<span>剩余 '+fmtETA(t.progress,elapsed)+'</span>':''):'';
   let html='<div class="top">'
     +'<span class="state-dot '+t.state+'"></span>'
     +'<span class="badge '+t.type+'">'+(TYPES[t.type]||t.type)+'</span>'
     +'<span class="name" title="'+esc(t.name)+'">'+esc(t.name)+'</span>'
-    +'<span class="pill">'+(t.progress||0).toFixed(0)+'%</span>'
+    +'<span class="pill">'+(t.progress>0?t.progress.toFixed(0)+'%':t.size?fmtB(t.size):'--')+'</span>'
     +'</div>'
     +'<div class="meta">'
     +'<span>'+fmtB(t.size)+'</span>'
-    +'<span>'+fmtR(t.download_rate)+'</span>'
-    +(t.type==='torrent'?'<span>↑ '+fmtR(t.upload_rate)+'</span>':'')
+    +(t.completed_size>0&&t.state!=='finished'?'<span>'+fmtB(t.completed_size)+'</span>':'')
+    +'<span style="display:inline-block;min-width:110px;font-variant-numeric:tabular-nums">'+fmtR(t.download_rate)+'</span>'
+    +(t.type==='torrent'?'<span style="display:inline-block;min-width:110px;font-variant-numeric:tabular-nums">↑ '+fmtR(t.upload_rate)+'</span>':'')
+    +timeInfo
     +(t.peers?'<span>'+t.peers+' 节点</span>':'')
     +'<span class="state-dot '+t.state+'"></span><span>'+({downloading:'下载中',paused:'已暂停',finished:'已完成',error:'错误',queued:'排队中',removed:'已移除',fetching:'获取中'})[t.state]||t.state+'</span>'
     +'</div>'
@@ -780,16 +842,23 @@ function renderTask(t){
     html+='</div>';
   }
   html+='<div class="row" style="margin-top:10px">';
-  if(t.type!=='m3u8'&&t.type!=='direct'){
-    if(t.state==='downloading'||t.state==='fetching')html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
-    if(t.state==='paused')html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">继续</button>';
+  if(t.state==='downloading'||t.state==='fetching'||t.state==='queued'){
+    html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
   }
-  html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">移除</button>';
-  html+='<span class="pill"><code class="dir">'+esc(t.dir||'')+'</code></span></div>';
+  if(t.state==='paused'){
+    html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">开始</button>';
+  }
+  if(t.state==='error'){
+    html+='<button class="btn sm go" data-act="retry" data-g="'+t.gid+'">重试</button>';
+  }
+  html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">删除</button>';
+  html+='<button class="btn sm" data-act="openDir" data-g="'+t.gid+'" title="'+esc(t.dir||'')+'">📂</button></div>';
   el.innerHTML=html;
   el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
   el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
-  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('移除此任务？将移至回收站。',{danger:true}))await post('/api/stop',{gid:t.gid})});
+  el.querySelector('[data-act=retry]')?.addEventListener('click',()=>post('/api/retry',{gid:t.gid}));
+  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('删除此任务？将移至回收站。',{danger:true}))await post('/api/stop',{gid:t.gid})});
+  el.querySelector('[data-act=openDir]')?.addEventListener('click',()=>post('/api/open_folder',{path:t.dir||''}));
   // File list toggle
   el.querySelector('.files-toggle')?.addEventListener('click',function(){
     this.classList.toggle('open');
@@ -829,7 +898,16 @@ function renderTrash(r){
   const el=document.createElement('div');el.className='rec';
   el.innerHTML='<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
     +'<div class="rsub">'+fmtB(r.size||0)+(r.paths&&r.paths.length?' · '+r.paths.length+' 个文件':'')+'</div></div>';
-  el.appendChild(tBtn('恢复','sm',async()=>{await post('/api/restore',{gid:r.gid});poll()}));
+  el.appendChild(tBtn('恢复','sm',async()=>{
+    const res=await post('/api/restore',{gid:r.gid});
+    if(res&&res.ok){
+      if(res.action==='task'){
+        if(res.type==='torrent'){showFileModal(res.gid)}
+        switchTab('tasks');
+      }
+    }
+    poll();
+  }));
   el.appendChild(tBtn('删除','danger',async()=>{
     const delFiles=await customConfirm('是否同时删除已下载的文件？',{title:'删除',okText:'删除记录和文件',cancelText:'仅删除记录',danger:true});
     await post(delFiles?'/api/purge':'/api/purge_record_only',{gid:r.gid});poll()}));
@@ -902,6 +980,14 @@ function render(s){
     if(openFiles.has(fid)){ft.classList.add('open');const w=document.getElementById(fid);if(w)w.classList.add('open')}
   });
   $('clearTasks').style.display=(s.tasks.length&&activeTab==='tasks')?'block':'none';
+  // Global button states
+  if(s.tasks.length){
+    const hasPaused=s.tasks.some(t=>t.state==='paused');
+    const hasActive=s.tasks.some(t=>(t.state==='downloading'||t.state==='fetching'||t.state==='queued'));
+    $('resumeAllBtn').disabled=!hasPaused;
+    $('pauseAllBtn').disabled=!hasActive;
+    $('deleteAllBtn').disabled=false;
+  }
   $('cTasks').textContent=s.tasks.length;
 
   const hp=$('pane-history');hp.innerHTML='';

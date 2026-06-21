@@ -219,7 +219,8 @@ def extract_video(url):
         # 提取公共元数据
         poster_match = re.search(r'<meta property="og:image" content="([^"]+)"', html)
         poster = poster_match.group(1) if poster_match else ""
-        magnet_match = re.search(r'href="(magnet:\?xt=urn:btih:[^"]+)"', html)
+        # 磁力链接：匹配 href 属性中的链接，以及页面文本中的磁力链接
+        magnet_match = re.search(r'(?:href=")?(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"<\s]*)(?:"|\b)', html)
         magnet = magnet_match.group(1) if magnet_match else ""
 
         # 策略 1: <video> / <source> 标签
@@ -263,6 +264,12 @@ def extract_video(url):
             vtype = "m3u8" if '.m3u8' in video_url else "direct"
             return {"ok": True, "title": result.get("title", ""), "poster": poster,
                     "m3u8_url": video_url, "magnet": magnet, "type": vtype}
+
+        # 策略 5: 页面中有磁力链接（无视频时仍可下载种子）
+        if magnet:
+            title = _extract_title(html)
+            return {"ok": True, "title": title, "poster": poster,
+                    "magnet": magnet, "m3u8_url": "", "type": "torrent"}
 
         return {"ok": False, "error": "未解析出可下载内容"}
 
@@ -411,7 +418,6 @@ class Engine:
         self.records = self._load_records()
         self.m3u8_tasks = {}
         self._m3u8_counter = 0
-        self._reconcile_stopped()
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
@@ -435,14 +441,14 @@ class Engine:
             "--seed-time=0",
             "--rpc-max-request-size=20M",
             "--bt-remove-unselected-file=true",
-            # Session persistence - survive restarts
+            # Session persistence - save for crash recovery (not restored on restart)
             "--save-session=" + os.path.join(BASE_DIR, ".aria2_session"),
             "--save-session-interval=30",
         ]
-        # Restore previous session if it exists
+        # Always start fresh: clear any stale session file from previous run
         session_file = os.path.join(BASE_DIR, ".aria2_session")
         if os.path.exists(session_file):
-            args.append("--input-file=" + session_file)
+            os.remove(session_file)
         # Add DHT entry points as separate args
         for ep in DHT_ENTRY_POINTS:
             args.append("--dht-entry-point=" + ep)
@@ -550,6 +556,8 @@ class Engine:
                         pass  # fall through to normal magnet add
             if ih:
                 existing_files = self._check_existing_files(ih)
+                # 启动后台线程从种子缓存服务获取元数据，加速磁力解析
+                threading.Thread(target=self._fetch_torrent_cache, args=(ih,), daemon=True).start()
         gid = self.aria.add(url, opts)
         self.tasks[gid] = {"type": t, "url": url, "submitted": True, "picked": False,
                            "pending": (t == "torrent"), "added_at": time.time()}
@@ -568,6 +576,49 @@ class Engine:
         except Exception:
             pass
         return existing
+
+    def _fetch_torrent_cache(self, info_hash):
+        """从种子缓存服务获取 torrent 元数据，加速磁力链接解析。"""
+        ih = info_hash.upper()
+        sources = [
+            f"https://itorrents.org/torrent/{ih}.torrent",
+            f"https://torrage.info/torrent/{ih}.torrent",
+            f"https://torcache.net/torrent/{ih}.torrent",
+        ]
+        for src in sources:
+            try:
+                r = requests.get(src, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                })
+                if r.status_code == 200 and len(r.content) > 100:
+                    torrent_path = os.path.join(self.save_path, info_hash.lower() + ".torrent")
+                    with open(torrent_path, "wb") as f:
+                        f.write(r.content)
+                    # 找到 aria2 中正在等待解析的磁力任务，用种子文件替换
+                    try:
+                        active = self.aria.active()
+                        waiting = self.aria.waiting()
+                        for s in (active + waiting):
+                            gid = s.get("gid", "")
+                            task_info = self.tasks.get(gid, {})
+                            if task_info.get("pending") and not task_info.get("picked"):
+                                task_url = task_info.get("url", "").lower()
+                                if info_hash.lower() in task_url:
+                                    new_gid = self.aria.add_torrent(r.content, {
+                                        "dir": self.save_path, "pause": "true",
+                                    })
+                                    # 链接新旧 gid，snapshot 会用 converted_to 保持前端 gid 稳定
+                                    self.tasks[new_gid] = {"type": "torrent", "url": task_info.get("url", ""),
+                                                          "submitted": True, "picked": False, "pending": True}
+                                    self.tasks[gid] = {"type": "torrent", "url": task_info.get("url", ""),
+                                                       "submitted": True, "picked": False, "pending": True,
+                                                       "converted_to": new_gid}
+                                    return
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                continue
 
     def set_settings(self, max_active=None, connections=None, uploads=None):
         if max_active is not None:
@@ -636,24 +687,25 @@ class Engine:
         real_gid = info.get("converted_to", gid) if info else gid
         return self.aria.resume(real_gid)
 
-    def stop(self, gid):
+    def stop(self, gid, skip_trash=False):
         info = self.tasks.get(gid)
         real_gid = info.get("converted_to", gid) if info else gid
-        # Save task info as a history record before removing
-        try:
-            s = self.aria.status(real_gid)
-            t = self._fmt_status(s)
-            if t:
-                rec = {
-                    "gid": gid, "type": t.get("type", "http"),
-                    "name": t.get("name", ""), "url": info.get("url", "") if info else "",
-                    "dir": t.get("dir", ""), "paths": t.get("paths", []),
-                    "size": t.get("size", 0), "completed_at": int(time.time()),
-                }
-                self.records["trash"].insert(0, rec)
-                self._save_records()
-        except Exception:
-            pass
+        if not skip_trash:
+            # Save task info as a history record before removing
+            try:
+                s = self.aria.status(real_gid)
+                t = self._fmt_status(s)
+                if t:
+                    rec = {
+                        "gid": gid, "type": t.get("type", "http"),
+                        "name": t.get("name", ""), "url": info.get("url", "") if info else "",
+                        "dir": t.get("dir", ""), "paths": t.get("paths", []),
+                        "size": t.get("size", 0), "completed_at": int(time.time()),
+                    }
+                    self.records["trash"].insert(0, rec)
+                    self._save_records()
+            except Exception:
+                pass
         self.aria.remove(real_gid)
         if real_gid != gid:
             try:
@@ -720,6 +772,7 @@ class Engine:
                 "state": state_map.get(st, st),
                 "progress": round(100 * done / total, 1) if total else 0,
                 "size": total,
+                "completed_size": done,
                 "download_rate": int(s.get("downloadSpeed", 0) or 0),
                 "upload_rate": int(s.get("uploadSpeed", 0) or 0),
                 "peers": int(s.get("numSeeders", 0) or 0) + int(s.get("connections", 0) or 0),
@@ -730,6 +783,7 @@ class Engine:
                 "url": info.get("url", ""),
                 "has_metadata": has_metadata,
                 "metadata_progress": round(100 * done / total, 1) if (total and not has_metadata) else 0,
+                "added_at": info.get("added_at", 0),
             }
         except Exception:
             return None
@@ -835,11 +889,25 @@ class Engine:
                 })
         if completed:
             self._save_records()
-        # 合并 m3u8 流媒体下载任务
-        for gid, info in self.m3u8_tasks.items():
+        # 合并 m3u8 流媒体下载任务，已完成/错误的自动归档
+        for gid, info in list(self.m3u8_tasks.items()):
             if info.get('state') == 'removed':
                 continue
+            state = info.get('state', 'downloading')
             output = info.get('output', '')
+            # 已完成 → 自动移入下载记录
+            if state == 'finished':
+                if gid not in existing:
+                    existing.add(gid)
+                    self.records["history"].insert(0, {
+                        "gid": gid, "type": "m3u8", "name": info.get('title', '视频下载'),
+                        "url": info.get('url', ''), "dir": self.save_path,
+                        "paths": [output] if output else [],
+                        "size": info.get('size', 0), "completed_at": int(time.time()),
+                    })
+                del self.m3u8_tasks[gid]
+                continue
+            # 错误 → 保留在任务列表，不自动归档
             items.append({
                 "gid": gid,
                 "type": "m3u8",
@@ -847,6 +915,7 @@ class Engine:
                 "state": info.get('state', 'downloading'),
                 "progress": info.get('progress', 0),
                 "size": info.get('size', 0),
+                "completed_size": info.get('size', 0),
                 "download_rate": info.get('download_rate', 0),
                 "upload_rate": 0,
                 "peers": 0,
@@ -857,6 +926,7 @@ class Engine:
                 "url": info.get('url', ''),
                 "has_metadata": True,
                 "metadata_progress": 0,
+                "added_at": info.get('added_at', 0),
             })
         return {
             "settings": {
@@ -883,10 +953,27 @@ class Engine:
     def restore(self, gid):
         for i, r in enumerate(self.records["trash"]):
             if r.get("gid") == gid:
-                self.records["history"].insert(0, self.records["trash"].pop(i))
-                self._save_records()
-                return True
-        return False
+                rec = self.records["trash"].pop(i)
+                paths = rec.get("paths", [])
+                file_exists = any(os.path.exists(p) for p in paths)
+                if file_exists:
+                    # 文件存在 → 已下载完成，恢复到下载记录
+                    self.records["history"].insert(0, rec)
+                    self._save_records()
+                    return {"action": "history", "ok": True}
+                else:
+                    # 文件不存在 → 未下载完成，重新添加到下载队列
+                    url = rec.get("url", "")
+                    if url:
+                        result = self.add(url)
+                        self._save_records()
+                        return {"action": "task", "ok": result.get("ok", False),
+                                "gid": result.get("gid"), "type": result.get("type")}
+                    else:
+                        self.records["history"].insert(0, rec)
+                        self._save_records()
+                        return {"action": "history", "ok": True}
+        return {"ok": False}
 
     def purge(self, gid, delete_files=True):
         """Permanently delete a record from trash, optionally deleting files on disk."""
@@ -964,11 +1051,32 @@ class Engine:
 
     # ---- m3u8/HLS 流媒体下载 (ffmpeg) ----
     def _get_m3u8_duration(self, m3u8_url):
-        """通过解析 m3u8 播放列表中的 EXTINF 标签来计算总时长（秒）。"""
+        """通过解析 m3u8 播放列表中的 EXTINF 标签来计算总时长（秒）。
+        支持主播放列表（master playlist）递归解析。"""
         try:
             r = requests.get(m3u8_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            text = r.text
+            # 检查是否为主播放列表（包含 EXT-X-STREAM-INF）
+            if '#EXT-X-STREAM-INF' in text:
+                # 取第一个（通常最高码率）变体播放列表
+                from urllib.parse import urljoin
+                best_bandwidth = 0
+                best_url = None
+                for line in text.split('\n'):
+                    if line.startswith('#EXT-X-STREAM-INF'):
+                        import re
+                        bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                        bw = int(bw_match.group(1)) if bw_match else 0
+                        if bw > best_bandwidth:
+                            best_bandwidth = bw
+                    elif best_bandwidth > 0 and line.strip() and not line.startswith('#'):
+                        best_url = urljoin(m3u8_url, line.strip())
+                        break
+                if best_url:
+                    return self._get_m3u8_duration(best_url)
+                return None
             total = 0.0
-            for line in r.text.split('\n'):
+            for line in text.split('\n'):
                 if line.startswith('#EXTINF:'):
                     dur = line.split(':')[1].split(',')[0]
                     total += float(dur)
@@ -976,31 +1084,62 @@ class Engine:
         except Exception:
             return None
 
-    def _download_m3u8_thread(self, gid, m3u8_url, title):
-        """在后台线程中运行 ffmpeg 下载 m3u8 流，并更新进度。"""
+    def _download_m3u8_thread(self, gid, m3u8_url, title, resume_from=0):
+        """在后台线程中运行 ffmpeg 下载 m3u8 流。resume_from>0 表示续传。"""
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or "视频"
         output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
-        # 避免文件名冲突
-        counter = 1
-        while os.path.exists(output_path):
-            output_path = os.path.join(self.save_path, f"{safe_title}_{counter}.mp4")
-            counter += 1
+        is_resume = resume_from > 0
+
+        if is_resume:
+            # 续传：使用已有文件路径，下载剩余部分后拼接
+            old_info = self.m3u8_tasks.get(gid, {})
+            existing_output = old_info.get('output', '')
+            if existing_output and os.path.exists(existing_output) and os.path.getsize(existing_output) > 1024:
+                output_path = existing_output
+            else:
+                # 部分文件不存在或太小，改为从头开始
+                is_resume = False
+                resume_from = 0
+            if is_resume:
+                part1_path = output_path
+                part2_path = output_path.replace('.mp4', '_part2.mp4')
+                counter = 1
+                while os.path.exists(part2_path):
+                    part2_path = output_path.replace('.mp4', f'_part2_{counter}.mp4')
+                    counter += 1
+                actual_output = part2_path
+        else:
+            counter = 1
+            while os.path.exists(output_path):
+                output_path = os.path.join(self.save_path, f"{safe_title}_{counter}.mp4")
+                counter += 1
+            actual_output = output_path
 
         duration = self._get_m3u8_duration(m3u8_url)
 
-        self.m3u8_tasks[gid] = {
+        info = {
             'url': m3u8_url, 'title': title, 'output': output_path,
-            'state': 'downloading', 'progress': 0, 'size': 0,
-            'download_rate': 0, 'current_time': 0, 'duration': duration,
-            'proc': None,
+            'state': 'downloading', 'progress': resume_from / duration * 100 if duration and resume_from else 0,
+            'size': 0, 'download_rate': 0,
+            'current_time': resume_from, 'duration': duration,
+            'proc': None, '_last_size': 0, '_last_time': time.time(), '_smooth_rate': 0,
+            'resume_from': resume_from, 'part1': output_path if is_resume else None,
+            'part2': actual_output if is_resume else None,
+            'added_at': (self.m3u8_tasks.get(gid, {}).get('added_at') if is_resume else None) or time.time(),
         }
+        self.m3u8_tasks[gid] = info
 
         cmd = [
-            'ffmpeg', '-y', '-i', m3u8_url,
+            'ffmpeg', '-y',
+        ]
+        if resume_from > 0:
+            cmd += ['-ss', str(resume_from)]
+        cmd += [
+            '-i', m3u8_url,
             '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
             '-movflags', '+faststart',
             '-progress', 'pipe:1', '-nostats', '-loglevel', 'error',
-            output_path
+            actual_output
         ]
 
         try:
@@ -1015,22 +1154,55 @@ class Engine:
                     parts = time_str.split(':')
                     try:
                         seconds = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                        self.m3u8_tasks[gid]['current_time'] = seconds
+                        self.m3u8_tasks[gid]['current_time'] = resume_from + seconds
                         if duration:
-                            self.m3u8_tasks[gid]['progress'] = min(round(100 * seconds / duration, 1), 99.9)
+                            self.m3u8_tasks[gid]['progress'] = min(round(100 * (resume_from + seconds) / duration, 1), 99.9)
                     except (ValueError, IndexError):
                         pass
                 elif line.startswith('speed='):
-                    self.m3u8_tasks[gid]['speed'] = line.split('=')[1].strip()
+                    pass
                 elif line.startswith('total_size='):
                     try:
-                        self.m3u8_tasks[gid]['size'] = int(line.split('=')[1])
-                    except ValueError:
+                        size = int(line.split('=')[1])
+                        self.m3u8_tasks[gid]['size'] = size
+                        now = time.time()
+                        last_size = self.m3u8_tasks[gid].get('_last_size', 0)
+                        last_time = self.m3u8_tasks[gid].get('_last_time', now)
+                        if now > last_time and size > last_size:
+                            instant = (size - last_size) / (now - last_time)
+                            prev = self.m3u8_tasks[gid].get('_smooth_rate', 0)
+                            alpha = 0.3 if prev > 0 else 0.8
+                            self.m3u8_tasks[gid]['_smooth_rate'] = alpha * instant + (1 - alpha) * prev
+                            self.m3u8_tasks[gid]['download_rate'] = int(self.m3u8_tasks[gid]['_smooth_rate'])
+                        self.m3u8_tasks[gid]['_last_size'] = size
+                        self.m3u8_tasks[gid]['_last_time'] = now
+                    except (ValueError, KeyError):
                         pass
 
             proc.wait()
 
+            # 如果是用户暂停杀进程，不覆盖状态
+            if gid in self.m3u8_tasks and self.m3u8_tasks[gid].get('state') == 'paused':
+                return
+
             if proc.returncode == 0:
+                if is_resume:
+                    # 拼接 part1 + part2 → 最终文件
+                    concat_list = output_path + '.concat.txt'
+                    with open(concat_list, 'w') as f:
+                        f.write(f"file '{part1_path}'\n")
+                        f.write(f"file '{part2_path}'\n")
+                    final_path = output_path.replace('.mp4', '_merged.mp4')
+                    concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                                  '-i', concat_list, '-c', 'copy', '-movflags', '+faststart', final_path]
+                    result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=300)
+                    if result.returncode == 0:
+                        os.replace(final_path, output_path)
+                        # 清理临时文件
+                        for fp in [part2_path, concat_list]:
+                            if os.path.exists(fp):
+                                try: os.remove(fp)
+                                except Exception: pass
                 self.m3u8_tasks[gid]['state'] = 'finished'
                 self.m3u8_tasks[gid]['progress'] = 100
                 if os.path.exists(output_path):
@@ -1041,31 +1213,85 @@ class Engine:
             self.m3u8_tasks[gid]['state'] = 'error'
             self.m3u8_tasks[gid]['error'] = str(e)
 
-    def start_m3u8_download(self, m3u8_url, title):
-        """启动 m3u8 流媒体下载。返回任务 gid。"""
+    def start_m3u8_download(self, m3u8_url, title, paused=False):
+        """启动 m3u8 流媒体下载。paused=True 时仅创建任务不开始下载。"""
         gid = f"m3u8_{self._m3u8_counter}"
         self._m3u8_counter += 1
-        t = threading.Thread(target=self._download_m3u8_thread,
-                             args=(gid, m3u8_url, title), daemon=True)
-        t.start()
+        if paused:
+            safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or "视频"
+            output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
+            self.m3u8_tasks[gid] = {
+                'url': m3u8_url, 'title': title, 'output': output_path,
+                'state': 'paused', 'progress': 0, 'size': 0,
+                'download_rate': 0, 'current_time': 0, 'duration': None,
+                'proc': None, '_last_size': 0, '_last_time': time.time(),
+                '_smooth_rate': 0, 'resume_from': 0, 'part1': None, 'part2': None,
+                'added_at': time.time(),
+            }
+        else:
+            t = threading.Thread(target=self._download_m3u8_thread,
+                                 args=(gid, m3u8_url, title), daemon=True)
+            t.start()
         return gid
 
-    def stop_m3u8_download(self, gid):
-        """停止 m3u8 下载并删除部分文件。"""
+    def stop_m3u8_download(self, gid, skip_trash=False):
+        """停止 m3u8 下载，保留部分文件并归档到回收站。"""
         if gid in self.m3u8_tasks:
-            proc = self.m3u8_tasks[gid].get('proc')
+            info = self.m3u8_tasks[gid]
+            proc = info.get('proc')
             if proc:
                 try:
                     proc.kill()
                 except Exception:
                     pass
-            output = self.m3u8_tasks[gid].get('output', '')
-            if output and os.path.exists(output):
+            if not skip_trash:
+                output = info.get('output', '')
+                self.records["trash"].insert(0, {
+                    "gid": gid, "type": "m3u8", "name": info.get('title', '视频下载'),
+                    "url": info.get('url', ''), "dir": self.save_path,
+                    "paths": [output] if output and os.path.exists(output) else [],
+                    "size": info.get('size', 0), "completed_at": int(time.time()),
+                })
+                self._save_records()
+            else:
+                # 跳过回收站时删除部分文件
+                output = info.get('output', '')
+                if output and os.path.exists(output):
+                    try:
+                        os.remove(output)
+                    except Exception:
+                        pass
+            del self.m3u8_tasks[gid]
+            return True
+        return False
+
+    def pause_m3u8_download(self, gid):
+        """暂停 m3u8 下载：杀进程，保留部分文件，任务留在列表中。"""
+        if gid in self.m3u8_tasks:
+            info = self.m3u8_tasks[gid]
+            proc = info.get('proc')
+            if proc:
                 try:
-                    os.remove(output)
+                    proc.kill()
                 except Exception:
                     pass
-            del self.m3u8_tasks[gid]
+            info['state'] = 'paused'
+            info['proc'] = None
+            return True
+        return False
+
+    def resume_m3u8_download(self, gid):
+        """续传 m3u8 下载：从上次中断位置继续。"""
+        if gid in self.m3u8_tasks:
+            info = self.m3u8_tasks[gid]
+            if info.get('state') not in ('paused', 'error'):
+                return False
+            url = info.get('url', '')
+            title = info.get('title', '视频下载')
+            resume_from = info.get('current_time', 0)
+            t = threading.Thread(target=self._download_m3u8_thread,
+                                 args=(gid, url, title, resume_from), daemon=True)
+            t.start()
             return True
         return False
 
@@ -1137,23 +1363,41 @@ def api_confirm():
 @app.route("/api/pause", methods=["POST"])
 def api_pause():
     data = request.get_json(force=True)
+    gid = data.get("gid")
+    if gid and gid.startswith("m3u8_"):
+        return jsonify(ok=engine.pause_m3u8_download(gid))
     return jsonify(ok=engine.pause(data.get("gid")))
 
 
 @app.route("/api/resume", methods=["POST"])
 def api_resume():
     data = request.get_json(force=True)
+    gid = data.get("gid")
+    if gid and gid.startswith("m3u8_"):
+        return jsonify(ok=engine.resume_m3u8_download(gid))
     return jsonify(ok=engine.resume(data.get("gid")))
+
+
+@app.route("/api/retry", methods=["POST"])
+def api_retry():
+    """重试失败的任务。m3u8 任务使用续传，aria2 任务调用 resume。"""
+    data = request.get_json(force=True)
+    gid = data.get("gid")
+    if gid and gid.startswith("m3u8_"):
+        return jsonify(ok=engine.resume_m3u8_download(gid))
+    else:
+        return jsonify(ok=engine.resume(gid))
 
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
     data = request.get_json(force=True)
     gid = data.get("gid")
+    skip_trash = data.get("skip_trash", False)
     if gid and gid.startswith("m3u8_"):
-        engine.stop_m3u8_download(gid)
+        engine.stop_m3u8_download(gid, skip_trash=skip_trash)
     else:
-        engine.stop(gid)
+        engine.stop(gid, skip_trash=skip_trash)
     return jsonify(ok=True)
 
 
@@ -1166,7 +1410,10 @@ def api_trash():
 @app.route("/api/restore", methods=["POST"])
 def api_restore():
     data = request.get_json(force=True)
-    return jsonify(ok=engine.restore(data.get("gid")))
+    result = engine.restore(data.get("gid"))
+    if isinstance(result, dict):
+        return jsonify(result)
+    return jsonify(ok=result)
 
 
 @app.route("/api/purge", methods=["POST"])
@@ -1217,9 +1464,10 @@ def api_download_m3u8():
     data = request.get_json(force=True)
     url = data.get("url", "").strip()
     title = data.get("title", "").strip()
+    paused = data.get("paused", False)
     if not url:
         return jsonify(ok=False, error="请输入 m3u8 地址"), 400
-    gid = engine.start_m3u8_download(url, title or "视频下载")
+    gid = engine.start_m3u8_download(url, title or "视频下载", paused=paused)
     return jsonify(ok=True, gid=gid, type="m3u8")
 
 
