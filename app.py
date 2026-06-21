@@ -513,16 +513,56 @@ class Engine:
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
+        existing_files = []
         if t == "torrent":
-            # Don't use bt-metadata-only - it restricts peer discovery to only
-            # peers that support BEP 9, which many don't. Instead, let aria2
-            # download normally. snapshot() auto-pauses as soon as bt_info.name
-            # is resolved, before any significant file data is downloaded.
-            pass
+            # Check if we already have a .torrent file for this magnet
+            ih = None
+            if "btih:" in url.lower():
+                ih = url.lower().split("btih:")[1].split("&")[0].strip()
+                torrent_path = os.path.join(self.save_path, ih + ".torrent")
+                if os.path.exists(torrent_path) and os.path.getsize(torrent_path) > 0:
+                    try:
+                        with open(torrent_path, "rb") as f:
+                            torrent_data = f.read()
+                        gid = self.aria.add_torrent(torrent_data, {
+                            "dir": self.save_path, "pause": "true",
+                            "max-connection-per-server": str(self.connections),
+                            "split": str(self.connections),
+                        })
+                        self.tasks[gid] = {"type": t, "url": url, "submitted": True,
+                                           "picked": False, "pending": True,
+                                           "added_at": time.time()}
+                        # Check if output files already exist
+                        existing_files = self._check_existing_files(ih)
+                        return {"ok": True, "gid": gid, "type": t,
+                                "cached": True, "existing_files": existing_files}
+                    except Exception:
+                        pass  # fall through to normal magnet add
+            # Check for existing files even for new magnet adds
+            if ih:
+                existing_files = self._check_existing_files(ih)
         gid = self.aria.add(url, opts)
         self.tasks[gid] = {"type": t, "url": url, "submitted": True, "picked": False,
                            "pending": (t == "torrent"), "added_at": time.time()}
-        return {"ok": True, "gid": gid, "type": t}
+        return {"ok": True, "gid": gid, "type": t, "existing_files": existing_files}
+
+    def _check_existing_files(self, info_hash):
+        """Check if files for this torrent already exist in the download directory."""
+        existing = []
+        try:
+            torrent_path = os.path.join(self.save_path, info_hash + ".torrent")
+            if os.path.exists(torrent_path):
+                existing.append({"name": info_hash + ".torrent", "size": os.path.getsize(torrent_path)})
+            # Also check for any .aria2 control files that indicate a previous download
+            for fn in os.listdir(self.save_path):
+                if fn.endswith(".aria2"):
+                    fp = os.path.join(self.save_path, fn)
+                    main_fp = os.path.join(self.save_path, fn[:-6])
+                    if os.path.exists(main_fp):
+                        existing.append({"name": fn[:-6], "size": os.path.getsize(main_fp)})
+        except Exception:
+            pass
+        return existing
 
     def set_settings(self, max_active=None, connections=None, uploads=None):
         if max_active is not None:

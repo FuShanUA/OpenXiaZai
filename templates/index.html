@@ -360,6 +360,12 @@ $('addBtn').onclick=async()=>{
     const res=await post('/api/add',{url});
     if(!res||res.ok===false){await customAlert(res?.error||'添加失败，请检查链接或后端服务');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
     $('url').value='';$('typeHint').style.display='none';
+    // Warn if files already exist
+    if(res.existing_files&&res.existing_files.length>0){
+      const names=res.existing_files.map(f=>f.name).join(', ');
+      const ok=await customConfirm('已存在下载文件：'+names+'。\n\n是否覆盖已有文件重新下载？',{title:'重复下载',okText:'覆盖',danger:true});
+      if(!ok){$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
+    }
     if(res.type==='torrent'){
       showFileModal(res.gid);
     } else {
