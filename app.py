@@ -1233,6 +1233,32 @@ def api_clipboard():
         return jsonify(text="", error=str(e))
 
 
+@app.route("/api/open_folder", methods=["POST"])
+def api_open_folder():
+    """在 Finder 中打开下载目录。"""
+    data = request.get_json(force=True)
+    path = data.get("path", engine.save_path)
+    try:
+        subprocess.Popen(["open", "-R", path])
+        return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
+
+@app.route("/api/play_file", methods=["POST"])
+def api_play_file():
+    """用默认应用打开文件（播放视频等）。"""
+    data = request.get_json(force=True)
+    path = data.get("path", "")
+    if not path or not os.path.exists(path):
+        return jsonify(ok=False, error="文件不存在")
+    try:
+        subprocess.Popen(["open", path])
+        return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
+
+
 if __name__ == "__main__":
     os.makedirs(DEFAULT_SAVE, exist_ok=True)
     print("=" * 60)

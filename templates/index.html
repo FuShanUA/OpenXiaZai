@@ -149,7 +149,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     <div class="logo">⬇</div>
     <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP</div></div>
     <div style="flex:1"></div>
-    <button class="btn sm" id="settingsBtn" title="设置" style="font-size:18px;padding:6px 10px">⚙</button>
+    <button class="btn sm" id="settingsBtn" title="设置" style="font-size:22px;padding:4px 8px">⚙</button>
   </header>
 
   <div class="card">
@@ -803,11 +803,27 @@ function renderTask(t){
 }
 function renderHistory(r){
   const el=document.createElement('div');el.className='rec';
-  el.innerHTML='<span class="badge '+r.type+'">'+(TYPES[r.type]||r.type)+'</span>'
-    +'<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
+  const btnStyle='border:none;background:var(--panel2);color:var(--muted);cursor:pointer;font-size:16px;padding:4px 8px;border-radius:6px;transition:.15s';
+  el.innerHTML='<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
     +'<div class="rsub">'+fmtB(r.size||0)+' · '+new Date((r.completed_at||0)*1000).toLocaleString()+'</div></div>';
-  const a=tBtn('移到回收站','danger',async()=>{await post('/api/trash',{gid:r.gid});poll()});
-  el.appendChild(a);return el;
+  // Open folder button
+  const openBtn=document.createElement('button');
+  openBtn.innerHTML='📂';openBtn.title='打开文件夹';openBtn.style=btnStyle;
+  openBtn.onclick=async()=>{
+    const path=r.dir?(r.dir+'/'+r.name):(r.paths&&r.paths[0]?r.paths[0]:'');
+    await post('/api/open_folder',{path:path||r.dir});
+  };
+  el.appendChild(openBtn);
+  // Play button
+  const playBtn=document.createElement('button');
+  playBtn.innerHTML='▶';playBtn.title='播放';playBtn.style=btnStyle;
+  playBtn.onclick=async()=>{
+    const path=r.paths&&r.paths[0]?r.paths[0]:(r.dir+'/'+r.name);
+    await post('/api/play_file',{path});
+  };
+  el.appendChild(playBtn);
+  const a=tBtn('🗑','danger',async()=>{await post('/api/trash',{gid:r.gid});poll()});
+  a.title='移到回收站';el.appendChild(a);return el;
 }
 function renderTrash(r){
   const el=document.createElement('div');el.className='rec';
