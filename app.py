@@ -428,7 +428,8 @@ class Engine:
             # DHT & peer discovery - critical for fast magnet link resolution
             "--enable-dht=true", "--dht-listen-port=6881-6999",
             "--dht-message-timeout=8",
-            "--bt-enable-lpd=true", "--bt-require-crypto=false",
+            "--bt-enable-lpd=true", "--enable-peer-exchange=true",
+            "--bt-require-crypto=false",
             "--bt-tracker-connect-timeout=8", "--bt-tracker-timeout=8",
             "--bt-tracker=" + BT_TRACKERS,
             "--seed-time=0",
@@ -513,15 +514,14 @@ class Engine:
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
         if t == "torrent":
-            # Download metadata only first to get the file list without downloading
-            # actual content. bt-metadata-only=true restricts to peers that support
-            # the metadata extension, which is needed for torrent file picking.
-            opts["bt-metadata-only"] = "true"
-            opts["bt-save-metadata"] = "true"
+            # Don't use bt-metadata-only - it restricts peer discovery to only
+            # peers that support BEP 9, which many don't. Instead, let aria2
+            # download normally. snapshot() auto-pauses as soon as bt_info.name
+            # is resolved, before any significant file data is downloaded.
+            pass
         gid = self.aria.add(url, opts)
         self.tasks[gid] = {"type": t, "url": url, "submitted": True, "picked": False,
-                           "pending": (t == "torrent"), "metadata_only": (t == "torrent"),
-                           "added_at": time.time()}
+                           "pending": (t == "torrent"), "added_at": time.time()}
         return {"ok": True, "gid": gid, "type": t}
 
     def set_settings(self, max_active=None, connections=None, uploads=None):
@@ -650,12 +650,7 @@ class Engine:
                 })
             # Metadata is ready ONLY when aria2 reports the info dictionary name.
             # Without bt-metadata-only, placeholder files appear before real metadata.
-            has_metadata = bool(bt_info.get("name")) or (info.get("metadata_only") and len(file_list) > 0)
-            # While a magnet link is still in metadata-only mode, don't expose the
-            # .torrent file itself in the file list; wait for conversion to real task.
-            if info.get("metadata_only"):
-                has_metadata = False
-                file_list = []
+            has_metadata = bool(bt_info.get("name"))
             state_map = {"active": "downloading", "waiting": "queued",
                          "paused": "paused", "complete": "finished",
                          "removed": "removed", "error": "error"}
@@ -731,65 +726,6 @@ class Engine:
                     continue
 
                 is_pending = info and info.get("pending") and not info.get("picked")
-                # Magnet metadata-only task finished -> convert to real torrent task.
-                if is_pending and t["type"] == "torrent" and info.get("metadata_only"):
-                    # Fallback: if metadata-only hasn't resolved after 30s, try without
-                    # the restriction. Some torrents lack peers that support BEP 9.
-                    elapsed = time.time() - info.get("added_at", time.time())
-                    if elapsed > 30 and not t.get("has_metadata") and not info.get("fallback_tried"):
-                        try:
-                            self.aria.change_option(t["gid"], {"bt-metadata-only": "false"})
-                            info["metadata_only"] = False
-                            info["fallback_tried"] = True
-                        except Exception:
-                            pass
-                    if t["state"] == "finished" and t["paths"]:
-                        # The torrent file is saved to save_path with info-hash filename.
-                        # aria2 reports the path as '[METADATA]...', but the real file
-                        # uses the hash. Find the actual .torrent file on disk.
-                        torrent_path = None
-                        url = info.get("url", "")
-                        if "btih:" in url:
-                            ih = url.split("btih:")[1].split("&")[0].strip().lower()
-                            candidate = os.path.join(self.save_path, ih + ".torrent")
-                            if os.path.exists(candidate):
-                                torrent_path = candidate
-                        if not torrent_path:
-                            try:
-                                for fn in os.listdir(self.save_path):
-                                    if fn.endswith(".torrent"):
-                                        fp = os.path.join(self.save_path, fn)
-                                        if os.path.getsize(fp) > 0:
-                                            torrent_path = fp
-                                            break
-                            except Exception:
-                                pass
-                        if torrent_path and os.path.exists(torrent_path):
-                            try:
-                                with open(torrent_path, "rb") as f:
-                                    torrent_data = f.read()
-                                new_gid = self.aria.add_torrent(torrent_data, {
-                                    "dir": self.save_path,
-                                    "pause": "true",
-                                    "max-connection-per-server": str(self.connections),
-                                    "split": str(self.connections),
-                                })
-                                info["converted_to"] = new_gid
-                                info["metadata_only"] = False
-                                info["torrent_path"] = torrent_path
-                                self.tasks[new_gid] = {"type": "torrent", "url": info["url"],
-                                                       "submitted": True, "picked": False,
-                                                       "pending": True}
-                                # Keep the finished metadata-only task in aria2 for now so
-                                # the frontend can keep polling the original gid.
-                                continue
-                            except Exception:
-                                pass
-                    # Still fetching metadata from magnet: show live progress.
-                    if t["gid"] not in seen_pending:
-                        seen_pending.add(t["gid"])
-                        pending.append(t)
-                    continue
                 # Auto-pause pending torrent once metadata resolves & files appear.
                 if is_pending and t["type"] == "torrent":
                     if t.get("has_metadata") and t.get("files") and len(t["files"]) > 0:

@@ -454,19 +454,22 @@ document.addEventListener('keydown',e=>{
   if(gids.length>0){cancelModal(gids[gids.length-1])}
 });
 
-// ---- 剪贴板监听（基于 paste 事件 + window focus） ----
+// ---- 剪贴板监听（paste 事件 + 轮询 + focus） ----
 (function(){
   let autoCooldown=false;
+  let lastText='';
   const LINK_RE=/^(magnet:|https?:\/\/|ftp:\/\/|sftp:\/\/|ed2k:\/\/|thunder:\/\/)/i;
 
   function tryAutoDownload(text){
     if(autoCooldown)return;
     const t=(text||'').trim();
     if(!t||!LINK_RE.test(t))return;
+    if(t===lastText)return;
     if(Object.keys(modalStates).length>0)return;
     if($('cxPreview').style.display==='block')return;
     if($('confirmOverlay').style.display==='flex')return;
     if(document.activeElement===$('url')&&$('url').value===t)return;
+    lastText=t;
     $('url').value=t;
     $('url').dispatchEvent(new Event('input'));
     $('addBtn').click();
@@ -474,15 +477,32 @@ document.addEventListener('keydown',e=>{
     setTimeout(()=>{autoCooldown=false},3000);
   }
 
+  // 读取剪贴板：优先浏览器 API，回退后端系统命令
+  async function readClipboard(){
+    try{const t=await navigator.clipboard.readText();if(t)return t}catch(e){}
+    try{const r=await fetch('/api/clipboard');if(r.ok){const d=await r.json();if(d.text)return d.text}}catch(e){}
+    return '';
+  }
+
+  // 轮询剪贴板（独立应用 WKWebView 中 clipboard API 不可用）
+  async function poll(){
+    if(autoCooldown)return;
+    try{const t=await readClipboard();if(t)tryAutoDownload(t)}catch(e){}
+  }
+  poll();
+  setInterval(poll,2000);
+
+  // 全局 paste 事件
   document.addEventListener('paste',e=>{
     if(document.activeElement===$('url'))return;
     const text=(e.clipboardData||window.clipboardData).getData('text');
     tryAutoDownload(text);
   });
 
+  // 窗口获得焦点时立即检查
   window.addEventListener('focus',async()=>{
     if(autoCooldown)return;
-    try{const text=await navigator.clipboard.readText();tryAutoDownload(text)}catch(e){}
+    try{const t=await readClipboard();if(t)tryAutoDownload(t)}catch(e){}
   });
 })();
 
