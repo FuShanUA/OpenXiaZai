@@ -520,7 +520,8 @@ class Engine:
             opts["bt-save-metadata"] = "true"
         gid = self.aria.add(url, opts)
         self.tasks[gid] = {"type": t, "url": url, "submitted": True, "picked": False,
-                           "pending": (t == "torrent"), "metadata_only": (t == "torrent")}
+                           "pending": (t == "torrent"), "metadata_only": (t == "torrent"),
+                           "added_at": time.time()}
         return {"ok": True, "gid": gid, "type": t}
 
     def set_settings(self, max_active=None, connections=None, uploads=None):
@@ -636,7 +637,7 @@ class Engine:
                 fp = f.get("path", "")
                 flen = int(f.get("length", 0) or 0)
                 # skip placeholder file aria2 emits before BT metadata resolves
-                if flen == 0 and fp == "":
+                if flen == 0 and (fp == "" or fp.startswith("[METADATA]")):
                     continue
                 fdone = int(f.get("completedLength", 0) or 0)
                 file_list.append({
@@ -649,7 +650,7 @@ class Engine:
                 })
             # Metadata is ready ONLY when aria2 reports the info dictionary name.
             # Without bt-metadata-only, placeholder files appear before real metadata.
-            has_metadata = bool(bt_info.get("name")) or (info.get("type") == "torrent" and len(file_list) > 0)
+            has_metadata = bool(bt_info.get("name")) or (info.get("metadata_only") and len(file_list) > 0)
             # While a magnet link is still in metadata-only mode, don't expose the
             # .torrent file itself in the file list; wait for conversion to real task.
             if info.get("metadata_only"):
@@ -732,6 +733,16 @@ class Engine:
                 is_pending = info and info.get("pending") and not info.get("picked")
                 # Magnet metadata-only task finished -> convert to real torrent task.
                 if is_pending and t["type"] == "torrent" and info.get("metadata_only"):
+                    # Fallback: if metadata-only hasn't resolved after 30s, try without
+                    # the restriction. Some torrents lack peers that support BEP 9.
+                    elapsed = time.time() - info.get("added_at", time.time())
+                    if elapsed > 30 and not t.get("has_metadata") and not info.get("fallback_tried"):
+                        try:
+                            self.aria.change_option(t["gid"], {"bt-metadata-only": "false"})
+                            info["metadata_only"] = False
+                            info["fallback_tried"] = True
+                        except Exception:
+                            pass
                     if t["state"] == "finished" and t["paths"]:
                         # The torrent file is saved to save_path with info-hash filename.
                         # aria2 reports the path as '[METADATA]...', but the real file
@@ -1226,6 +1237,21 @@ def api_choose_dir():
         return jsonify(ok=False, error="未选择目录")
     except Exception as e:
         return jsonify(ok=False, error=str(e))
+
+
+@app.route("/api/clipboard")
+def api_clipboard():
+    """读取系统剪贴板（macOS pbpaste / Windows powershell）。"""
+    import platform
+    try:
+        if platform.system() == "Windows":
+            r = subprocess.run(["powershell", "-Command", "Get-Clipboard"],
+                             capture_output=True, text=True, timeout=3)
+        else:
+            r = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=3)
+        return jsonify(text=r.stdout)
+    except Exception as e:
+        return jsonify(text="", error=str(e))
 
 
 if __name__ == "__main__":

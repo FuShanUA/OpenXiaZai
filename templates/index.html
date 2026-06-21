@@ -137,7 +137,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 @keyframes spin{to{transform:rotate(360deg)}}
 .info-text{color:var(--muted);font-size:13px;text-align:center;padding:40px 10px}
 /* 右键菜单 */
-.ctx-menu{position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:130px;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.ctx-menu{position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:130px;z-index:2147483647;box-shadow:0 4px 20px rgba(0,0,0,.5)}
 .ctx-item{padding:8px 14px;cursor:pointer;border-radius:6px;font-size:13px;color:var(--text);display:flex;align-items:center;gap:8px;transition:background .1s;user-select:none}
 .ctx-item:hover{background:var(--hover)}
 .ctx-sep{height:1px;background:var(--border);margin:4px 8px}
@@ -152,8 +152,11 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 
   <div class="card">
     <div class="row">
-      <input type="text" id="url" placeholder="粘贴链接：magnet:、ed2k://、http(s)://、ftp://、夸克网盘…" style="flex:1">
-      <button class="btn sm" id="pasteBtn" title="从剪贴板粘贴">📋</button>
+      <div style="position:relative;flex:1">
+        <input type="text" id="url" placeholder="粘贴链接：magnet:、ed2k://、http(s)://、ftp://、夸克网盘…" style="flex:1;padding-right:28px">
+        <button id="clearUrlBtn" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px 6px;display:none;line-height:1" title="清空">✕</button>
+      </div>
+      <button class="btn sm" id="menuBtn" title="更多操作">⋮</button>
       <button class="btn primary" id="addBtn">添加下载</button>
     </div>
     <div id="typeHint" class="hint" style="display:none"></div>
@@ -232,6 +235,12 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       <button class="btn primary" id="confirmOk">确定</button>
     </div>
   </div>
+</div>
+
+<!-- 下拉菜单 -->
+<div id="dropMenu" class="ctx-menu" style="display:none">
+  <div class="ctx-item" data-action="paste">📋 从剪贴板粘贴</div>
+  <div class="ctx-item" data-action="clear">✕ 清空输入框</div>
 </div>
 
 <script>
@@ -362,78 +371,83 @@ $('addBtn').onclick=async()=>{
   $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
 };
 
-// ---- 粘贴工具函数 ----
+// ---- 粘贴工具函数（Clipboard API → 后端系统剪贴板 → execCommand） ----
 async function doPaste(){
-  // 优先用 Clipboard API
+  // 方案 A: 浏览器 Clipboard API
   try{
     const text=await navigator.clipboard.readText();
     if(text&&text.trim()) return text.trim();
   }catch(e){}
-  // fallback: execCommand
+  // 方案 B: 后端系统剪贴板（独立应用 WKWebView）
+  try{
+    const r=await fetch('/api/clipboard');
+    if(r.ok){const data=await r.json();if(data.text&&data.text.trim()) return data.text.trim()}
+  }catch(e){}
+  // 方案 C: contenteditable + execCommand('paste')
   return new Promise(resolve=>{
-    const prev=$('url').value;
-    const handler=e=>{
-      const text=(e.clipboardData||window.clipboardData).getData('text');
-      $('url').removeEventListener('paste',handler);
-      $('url').value=prev;
-      resolve(text);
-    };
-    $('url').addEventListener('paste',handler);
-    $('url').value='';
-    $('url').focus();
-    setTimeout(()=>{
-      const ok=document.execCommand('paste');
-      if(!ok){$('url').removeEventListener('paste',handler);$('url').value=prev;resolve('')}
-    },50);
+    const div=document.createElement('div');
+    div.contentEditable='true';
+    div.style.cssText='position:fixed;top:0;left:0;width:2px;height:2px;opacity:0;z-index:99999';
+    document.body.appendChild(div);
+    div.focus();
+    let done=false;
+    const finish=t=>{if(done)return;done=true;clearTimeout(timer);div.removeEventListener('paste',onPaste);try{document.body.removeChild(div)}catch(e){}resolve(t||'')};
+    const onPaste=e=>{e.preventDefault();finish((e.clipboardData||window.clipboardData).getData('text'))};
+    div.addEventListener('paste',onPaste);
+    const timer=setTimeout(()=>{if(!document.execCommand('paste'))finish('')},50);
+    setTimeout(()=>finish(''),2000);
   });
 }
+
 async function pasteIntoInput(){
   const text=await doPaste();
-  if(text){
-    $('url').value=text;
+  if(text&&text.trim()){
+    $('url').value=text.trim();
     $('url').dispatchEvent(new Event('input'));
   }
   $('url').focus();
 }
 
-// ---- 粘贴按钮 ----
-$('pasteBtn').onclick=pasteIntoInput;
+// ---- 输入框清空按钮 ----
+$('url').addEventListener('input',()=>{$('clearUrlBtn').style.display=$('url').value?'block':'none'});
+$('clearUrlBtn').onclick=()=>{$('url').value='';$('url').dispatchEvent(new Event('input'));$('clearUrlBtn').style.display='none';$('url').focus()};
 
-// ---- 右键菜单 ----
-const ctxMenu=$('ctxMenu');
-let ctxTarget=null;
+// ---- 下拉菜单（⋮ 按钮） ----
+(function(){
+  const dropMenu=$('dropMenu');
+  function showDrop(btn){
+    const r=btn.getBoundingClientRect();
+    dropMenu.style.display='block';
+    dropMenu.style.left=Math.min(r.left,window.innerWidth-150)+'px';
+    dropMenu.style.top=(r.bottom+4)+'px';
+  }
+  function hideDrop(){dropMenu.style.display='none'}
 
-function hideCtxMenu(){ctxMenu.style.display='none';ctxTarget=null}
+  $('menuBtn').onclick=function(e){
+    e.stopPropagation();
+    if(dropMenu.style.display==='block'){hideDrop();return}
+    showDrop(this);
+  };
 
-$('url').addEventListener('contextmenu',e=>{
-  e.preventDefault();
-  ctxTarget=$('url');
-  const r=ctxTarget.getBoundingClientRect();
-  ctxMenu.style.display='block';
-  ctxMenu.style.left=(e.clientX||r.left)+'px';
-  ctxMenu.style.top=(e.clientY||r.bottom)+'px';
-  // 确保不超出视口
-  const mr=ctxMenu.getBoundingClientRect();
-  if(mr.right>window.innerWidth)ctxMenu.style.left=(window.innerWidth-mr.width-8)+'px';
-  if(mr.bottom>window.innerHeight)ctxMenu.style.top=(e.clientY-mr.height-4)+'px';
-});
+  document.addEventListener('mousedown',function(e){
+    if(dropMenu.style.display==='block'&&!dropMenu.contains(e.target)&&e.target!==$('menuBtn')){
+      hideDrop();
+    }
+  });
 
-ctxMenu.addEventListener('click',async e=>{
-  const item=e.target.closest('.ctx-item');
-  hideCtxMenu();
-  if(!item)return;
-  const action=item.dataset.action;
-  if(action==='paste'){await pasteIntoInput()}
-  else if(action==='clear'){$('url').value='';$('url').dispatchEvent(new Event('input'));$('url').focus()}
-});
-
-document.addEventListener('click',e=>{if(!ctxMenu.contains(e.target))hideCtxMenu()});
-document.addEventListener('scroll',hideCtxMenu,true);
+  dropMenu.addEventListener('click',async function(e){
+    const item=e.target.closest('.ctx-item');
+    hideDrop();
+    if(!item)return;
+    if(item.dataset.action==='paste'){await pasteIntoInput()}
+    else if(item.dataset.action==='clear'){$('url').value='';$('url').dispatchEvent(new Event('input'));$('clearUrlBtn').style.display='none';$('url').focus()}
+  });
+})();
 
 // ---- Esc 关闭弹窗 ----
 document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
-  hideCtxMenu();
+  const d=$('dropMenu');if(d.style.display==='block')d.style.display='none';
   if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
   if($('cxPreview').style.display==='block'){hideCxPreview();return}
   const gids=Object.keys(modalStates);
@@ -452,7 +466,6 @@ document.addEventListener('keydown',e=>{
     if(Object.keys(modalStates).length>0)return;
     if($('cxPreview').style.display==='block')return;
     if($('confirmOverlay').style.display==='flex')return;
-    // 如果当前正在输入框里编辑，不自动触发
     if(document.activeElement===$('url')&&$('url').value===t)return;
     $('url').value=t;
     $('url').dispatchEvent(new Event('input'));
@@ -461,21 +474,15 @@ document.addEventListener('keydown',e=>{
     setTimeout(()=>{autoCooldown=false},3000);
   }
 
-  // 全局 paste 事件：用户在任何地方 Ctrl+V / Cmd+V 时触发
   document.addEventListener('paste',e=>{
-    // 如果焦点在输入框内，让输入框自己处理
     if(document.activeElement===$('url'))return;
     const text=(e.clipboardData||window.clipboardData).getData('text');
     tryAutoDownload(text);
   });
 
-  // 窗口获得焦点时尝试读剪贴板
   window.addEventListener('focus',async()=>{
     if(autoCooldown)return;
-    try{
-      const text=await navigator.clipboard.readText();
-      tryAutoDownload(text);
-    }catch(e){}
+    try{const text=await navigator.clipboard.readText();tryAutoDownload(text)}catch(e){}
   });
 })();
 
@@ -860,10 +867,5 @@ function render(s){
 }
 poll();setInterval(poll,1500);
 </script>
-<!-- 右键快捷菜单 -->
-<div id="ctxMenu" class="ctx-menu" style="display:none">
-  <div class="ctx-item" data-action="paste">📋 粘贴</div>
-  <div class="ctx-item" data-action="clear">✕ 清空</div>
-</div>
 </body>
 </html>
