@@ -53,7 +53,7 @@ def main():
         print("后端启动失败,请检查 aria2c 是否已安装。")
         return
     webview.create_window(
-        "磁力 / P2P 下载器",
+        "OpenXiaZai",
         f"http://127.0.0.1:{PORT}/",
         width=1120,
         height=780,

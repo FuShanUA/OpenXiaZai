@@ -41,6 +41,8 @@ input[type=text]:focus{border-color:var(--accent)}
   border:1px solid var(--border);color:var(--accent)}
 .badge.torrent{color:#c9a3ff}.badge.http{color:#4f9dff}.badge.ftp{color:#34c759}
 .badge.unsup{color:var(--warn)}
+.badge.m3u8{color:#ff5c5c}
+.badge.direct{color:#ff5c5c}
 /* tabs */
 .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
 .tab{padding:8px 16px;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;
@@ -94,10 +96,10 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 .rec .rsub{font-size:11px;color:var(--muted);margin-top:2px}
 .pill{font-variant-numeric:tabular-nums;font-size:11px;color:var(--muted)}
 /* modal */
-.modal-overlay{position:absolute;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-start;justify-content:center;padding-top:28px}
+.modal-overlay{position:absolute;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-start;justify-content:center;padding-top:28px;pointer-events:none}
 .modal-overlay:nth-child(2){padding-top:48px}
 .modal-overlay:nth-child(3){padding-top:68px}
-.modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:680px;max-width:94vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:680px;max-width:94vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5);pointer-events:auto}
 .modal-head{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:grab;user-select:none}
 .modal-head:active{cursor:grabbing}
 .modal-head h3{margin:0;font-size:15px;flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -134,6 +136,11 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 .spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;margin-right:8px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .info-text{color:var(--muted);font-size:13px;text-align:center;padding:40px 10px}
+/* 右键菜单 */
+.ctx-menu{position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:130px;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.ctx-item{padding:8px 14px;cursor:pointer;border-radius:6px;font-size:13px;color:var(--text);display:flex;align-items:center;gap:8px;transition:background .1s;user-select:none}
+.ctx-item:hover{background:var(--hover)}
+.ctx-sep{height:1px;background:var(--border);margin:4px 8px}
 </style>
 </head>
 <body>
@@ -146,9 +153,26 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="card">
     <div class="row">
       <input type="text" id="url" placeholder="粘贴链接：magnet:、ed2k://、http(s)://、ftp://、夸克网盘…" style="flex:1">
+      <button class="btn sm" id="pasteBtn" title="从剪贴板粘贴">📋</button>
       <button class="btn primary" id="addBtn">添加下载</button>
     </div>
     <div id="typeHint" class="hint" style="display:none"></div>
+  </div>
+
+  <!-- 视频提取预览卡片 -->
+  <div class="card" id="cxPreview" style="display:none">
+    <div class="row" style="align-items:flex-start">
+      <img id="cxPoster" style="width:80px;height:110px;object-fit:cover;border-radius:8px;flex-shrink:0;background:var(--panel2)" alt="">
+      <div style="flex:1;min-width:0">
+        <div id="cxTitle" style="font-weight:600;font-size:15px;margin-bottom:6px"></div>
+        <div id="cxMagnet" style="font-size:11px;color:var(--muted);word-break:break-all;margin-bottom:4px;display:none"></div>
+        <div id="cxM3u8" style="font-size:11px;color:var(--accent);word-break:break-all"></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px;gap:8px">
+      <button class="btn go" id="cxDownload">下载视频</button>
+      <button class="btn" id="cxCancel">取消</button>
+    </div>
   </div>
 
   <div class="card">
@@ -194,7 +218,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 <div id="modalContainer" style="position:fixed;inset:0;pointer-events:none;z-index:100"></div>
 <!-- template for file picker modals -->
 <template id="modalTemplate">
-<div class="modal-overlay" style="pointer-events:auto">
+<div class="modal-overlay">
   <div class="modal" style="width:680px;max-width:94vw;max-height:85vh"><div class="modal-head drag-handle"><h3 class="modal-title"></h3><span class="pill modal-size"></span></div><div class="modal-body"></div><div class="modal-foot"></div></div>
 </div>
 </template>
@@ -212,7 +236,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷"};
+const TYPES={torrent:"种子/磁力",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链"};
 const UNSUP={ed2k:1,quark:1,cloud:1,thunder:1};
 let activeTab='tasks';
 let cur=null;
@@ -265,14 +289,63 @@ $('url').addEventListener('input',()=>{
   else if(v.startsWith('ed2k'))t='ed2k';
   else if(v.includes('quark.cn'))t='quark';
   else if(v.startsWith('thunder'))t='thunder';
+  else if(/\.m3u8($|\?)/.test(v))t='m3u8';
+  else if(/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v))t='direct';
   else if(v.startsWith('http'))t='http';
   h.style.display='block';
   h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'');
 });
 
+// 判断 URL 是否为直接文件下载（不走视频提取）
+function isDirectFileDownload(url){
+  const dlExts=['.zip','.rar','.7z','.tar.gz','.tar.bz2','.tar.xz','.gz','.bz2',
+    '.pdf','.dmg','.iso','.exe','.apk','.ipa','.deb','.rpm',
+    '.doc','.docx','.xls','.xlsx','.ppt','.pptx',
+    '.txt','.csv','.json','.xml','.html','.htm',
+    '.jpg','.jpeg','.png','.gif','.webp','.svg','.ico',
+    '.mp3','.flac','.wav','.aac','.ogg','.wma','.m4a',
+    '.torrent','.css','.js','.py','.sh','.rb','.go','.java','.c','.cpp'];
+  const ext=url.toLowerCase().split('?')[0].split('#')[0];
+  return dlExts.some(e=>ext.endsWith(e));
+}
+
 $('addBtn').onclick=async()=>{
   const url=$('url').value.trim();
   if(!url){return}
+  const v=url.toLowerCase();
+
+  // HTTP 网页链接：尝试提取视频
+  if(v.startsWith('http')&&!isDirectFileDownload(v)){
+    // 直接视频链接 → 走 m3u8 下载
+    if(/\.m3u8($|\?)/.test(v)||/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v)){
+      $('addBtn').disabled=true;$('addBtn').textContent='添加中…';
+      try{
+        const name=url.split('/').pop().split('?')[0]||'视频';
+        const res=await post('/api/download_m3u8',{url,title:name});
+        if(!res||res.ok===false){await customAlert(res?.error||'添加失败');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
+        $('url').value='';$('typeHint').style.display='none';
+        switchTab('tasks');
+      }catch(e){await customAlert('添加失败: '+e.message)}
+      $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+      return;
+    }
+
+    // 网页链接：尝试通用视频提取
+    $('addBtn').disabled=true;$('addBtn').textContent='解析中…';
+    try{
+      const res=await post('/api/parse',{url});
+      if(!res||res.ok===false){
+        await customAlert('未解析出可下载内容');
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      showCxPreview(res);
+    }catch(e){await customAlert('解析失败: '+e.message)}
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
+  // 非 HTTP 链接（magnet/ed2k/ftp 等）→ 原有流程
   $('addBtn').disabled=true;$('addBtn').textContent='添加中…';
   try{
     const res=await post('/api/add',{url});
@@ -289,8 +362,151 @@ $('addBtn').onclick=async()=>{
   $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
 };
 
+// ---- 粘贴工具函数 ----
+async function doPaste(){
+  // 优先用 Clipboard API
+  try{
+    const text=await navigator.clipboard.readText();
+    if(text&&text.trim()) return text.trim();
+  }catch(e){}
+  // fallback: execCommand
+  return new Promise(resolve=>{
+    const prev=$('url').value;
+    const handler=e=>{
+      const text=(e.clipboardData||window.clipboardData).getData('text');
+      $('url').removeEventListener('paste',handler);
+      $('url').value=prev;
+      resolve(text);
+    };
+    $('url').addEventListener('paste',handler);
+    $('url').value='';
+    $('url').focus();
+    setTimeout(()=>{
+      const ok=document.execCommand('paste');
+      if(!ok){$('url').removeEventListener('paste',handler);$('url').value=prev;resolve('')}
+    },50);
+  });
+}
+async function pasteIntoInput(){
+  const text=await doPaste();
+  if(text){
+    $('url').value=text;
+    $('url').dispatchEvent(new Event('input'));
+  }
+  $('url').focus();
+}
+
+// ---- 粘贴按钮 ----
+$('pasteBtn').onclick=pasteIntoInput;
+
+// ---- 右键菜单 ----
+const ctxMenu=$('ctxMenu');
+let ctxTarget=null;
+
+function hideCtxMenu(){ctxMenu.style.display='none';ctxTarget=null}
+
+$('url').addEventListener('contextmenu',e=>{
+  e.preventDefault();
+  ctxTarget=$('url');
+  const r=ctxTarget.getBoundingClientRect();
+  ctxMenu.style.display='block';
+  ctxMenu.style.left=(e.clientX||r.left)+'px';
+  ctxMenu.style.top=(e.clientY||r.bottom)+'px';
+  // 确保不超出视口
+  const mr=ctxMenu.getBoundingClientRect();
+  if(mr.right>window.innerWidth)ctxMenu.style.left=(window.innerWidth-mr.width-8)+'px';
+  if(mr.bottom>window.innerHeight)ctxMenu.style.top=(e.clientY-mr.height-4)+'px';
+});
+
+ctxMenu.addEventListener('click',async e=>{
+  const item=e.target.closest('.ctx-item');
+  hideCtxMenu();
+  if(!item)return;
+  const action=item.dataset.action;
+  if(action==='paste'){await pasteIntoInput()}
+  else if(action==='clear'){$('url').value='';$('url').dispatchEvent(new Event('input'));$('url').focus()}
+});
+
+document.addEventListener('click',e=>{if(!ctxMenu.contains(e.target))hideCtxMenu()});
+document.addEventListener('scroll',hideCtxMenu,true);
+
+// ---- Esc 关闭弹窗 ----
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  hideCtxMenu();
+  if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
+  if($('cxPreview').style.display==='block'){hideCxPreview();return}
+  const gids=Object.keys(modalStates);
+  if(gids.length>0){cancelModal(gids[gids.length-1])}
+});
+
+// ---- 剪贴板监听（基于 paste 事件 + window focus） ----
+(function(){
+  let autoCooldown=false;
+  const LINK_RE=/^(magnet:|https?:\/\/|ftp:\/\/|sftp:\/\/|ed2k:\/\/|thunder:\/\/)/i;
+
+  function tryAutoDownload(text){
+    if(autoCooldown)return;
+    const t=(text||'').trim();
+    if(!t||!LINK_RE.test(t))return;
+    if(Object.keys(modalStates).length>0)return;
+    if($('cxPreview').style.display==='block')return;
+    if($('confirmOverlay').style.display==='flex')return;
+    // 如果当前正在输入框里编辑，不自动触发
+    if(document.activeElement===$('url')&&$('url').value===t)return;
+    $('url').value=t;
+    $('url').dispatchEvent(new Event('input'));
+    $('addBtn').click();
+    autoCooldown=true;
+    setTimeout(()=>{autoCooldown=false},3000);
+  }
+
+  // 全局 paste 事件：用户在任何地方 Ctrl+V / Cmd+V 时触发
+  document.addEventListener('paste',e=>{
+    // 如果焦点在输入框内，让输入框自己处理
+    if(document.activeElement===$('url'))return;
+    const text=(e.clipboardData||window.clipboardData).getData('text');
+    tryAutoDownload(text);
+  });
+
+  // 窗口获得焦点时尝试读剪贴板
+  window.addEventListener('focus',async()=>{
+    if(autoCooldown)return;
+    try{
+      const text=await navigator.clipboard.readText();
+      tryAutoDownload(text);
+    }catch(e){}
+  });
+})();
+
 // Enter key in URL input triggers add
 $('url').addEventListener('keydown',e=>{if(e.key==='Enter')$('addBtn').click()});
+
+// ---- 视频提取预览卡片 ----
+let cxData=null;
+function showCxPreview(data){
+  cxData=data;
+  $('cxTitle').textContent=data.title||'未知影片';
+  $('cxM3u8').textContent='视频源: '+(data.m3u8_url||'');
+  if(data.magnet){$('cxMagnet').textContent='磁力: '+data.magnet;$('cxMagnet').style.display=''}
+  else{$('cxMagnet').style.display='none'}
+  if(data.poster){$('cxPoster').src=data.poster;$('cxPoster').style.display=''}
+  else{$('cxPoster').style.display='none'}
+  $('cxPreview').style.display='block';
+  $('url').value='';$('typeHint').style.display='none';
+}
+function hideCxPreview(){cxData=null;$('cxPreview').style.display='none';$('url').value=''}
+$('cxDownload').onclick=async()=>{
+  if(!cxData)return;
+  $('cxDownload').disabled=true;$('cxDownload').textContent='添加中…';
+  try{
+    const res=await post('/api/download_m3u8',{url:cxData.m3u8_url,title:cxData.title});
+    if(res&&res.ok){hideCxPreview();switchTab('tasks')}
+    else{await customAlert(res?.error||'下载失败')}
+  }catch(e){await customAlert('下载失败: '+e.message)}
+  $('cxDownload').disabled=false;$('cxDownload').textContent='下载视频';
+};
+$('cxCancel').onclick=hideCxPreview;
 
 // ---- file selection modal (multi, draggable, stackable) ----
 const modalStates={};  // gid -> {overlay, timer, startTime}
@@ -461,7 +677,7 @@ $('resumeAllBtn').onclick=async()=>{
   }
 };
 $('clearTasksBtn').onclick=async()=>{
-  if(!await customConfirm('确定要停止并移除全部下载任务吗？',{danger:true}))return;
+  if(!await customConfirm('确定要暂停全部下载任务吗？',{danger:true}))return;
   await post('/api/clear_tasks');
 };
 $('clearHistBtn').onclick=async()=>{
@@ -522,8 +738,10 @@ function renderTask(t){
     html+='</div>';
   }
   html+='<div class="row" style="margin-top:10px">';
-  if(t.state==='downloading'||t.state==='fetching')html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
-  if(t.state==='paused')html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">继续</button>';
+  if(t.type!=='m3u8'&&t.type!=='direct'){
+    if(t.state==='downloading'||t.state==='fetching')html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
+    if(t.state==='paused')html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">继续</button>';
+  }
   html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">移除</button>';
   html+='<span class="pill"><code class="dir">'+esc(t.dir||'')+'</code></span></div>';
   el.innerHTML=html;
@@ -642,5 +860,10 @@ function render(s){
 }
 poll();setInterval(poll,1500);
 </script>
+<!-- 右键快捷菜单 -->
+<div id="ctxMenu" class="ctx-menu" style="display:none">
+  <div class="ctx-item" data-action="paste">📋 粘贴</div>
+  <div class="ctx-item" data-action="clear">✕ 清空</div>
+</div>
 </body>
 </html>
