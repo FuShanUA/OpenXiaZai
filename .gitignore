@@ -7,3 +7,9 @@ venv/
 .aria2_dht.dat
 records.json
 .aria2_session
+build/
+dist/
+*.spec
+*.dmg
+*.exe
+*.pkg
