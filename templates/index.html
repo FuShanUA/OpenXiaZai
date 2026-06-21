@@ -190,7 +190,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div id="pane-history" style="display:none"></div>
   <div id="pane-trash" style="display:none"></div>
   <div class="clear-bar" id="clearTasks" style="display:none"><button class="btn sm go" id="resumeAllBtn">开始全部任务</button><button class="btn sm danger" id="clearTasksBtn">停止全部任务</button></div>
-  <div class="clear-bar" id="clearHist" style="display:none"><button class="btn sm danger" id="clearHistBtn">清空下载记录</button></div>
+  <div class="clear-bar" id="clearHist" style="display:none"><button class="btn sm danger" id="clearHistBtn">移至回收站</button></div>
   <div class="clear-bar" id="clearTrash" style="display:none"><button class="btn sm danger" id="clearTrashBtn">清空回收站</button><button class="btn sm danger" id="clearTrashFilesBtn" style="margin-left:6px">清空回收站并删除文件</button></div>
 </div>
 <div id="modalContainer" style="position:fixed;inset:0;pointer-events:none;z-index:100"></div>
@@ -723,7 +723,7 @@ $('clearTasksBtn').onclick=async()=>{
   await post('/api/clear_tasks');
 };
 $('clearHistBtn').onclick=async()=>{
-  if(!await customConfirm('确定要清空全部下载记录吗？',{danger:true}))return;
+  if(!await customConfirm('确定要将全部下载记录移至回收站吗？',{danger:true}))return;
   await post('/api/clear_history');
 };
 $('clearTrashBtn').onclick=async()=>{
@@ -827,12 +827,12 @@ function renderHistory(r){
 }
 function renderTrash(r){
   const el=document.createElement('div');el.className='rec';
-  el.innerHTML='<span class="badge '+r.type+'">'+(TYPES[r.type]||r.type)+'</span>'
-    +'<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
+  el.innerHTML='<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
     +'<div class="rsub">'+fmtB(r.size||0)+(r.paths&&r.paths.length?' · '+r.paths.length+' 个文件':'')+'</div></div>';
   el.appendChild(tBtn('恢复','sm',async()=>{await post('/api/restore',{gid:r.gid});poll()}));
-  el.appendChild(tBtn('彻底删除','danger',async()=>{
-    if(await customConfirm('彻底删除？将同时删除已下载的文件/文件夹，且不可恢复。',{title:'彻底删除',okText:'彻底删除',danger:true})){await post('/api/purge',{gid:r.gid});poll()}}));
+  el.appendChild(tBtn('删除','danger',async()=>{
+    const delFiles=await customConfirm('是否同时删除已下载的文件？',{title:'删除',okText:'删除记录和文件',cancelText:'仅删除记录',danger:true});
+    await post(delFiles?'/api/purge':'/api/purge_record_only',{gid:r.gid});poll()}));
   return el;
 }
 

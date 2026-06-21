@@ -902,7 +902,8 @@ class Engine:
             self.stop_m3u8_download(gid)
 
     def clear_all_history(self):
-        """Clear all download history records."""
+        """Move all history records to trash."""
+        self.records["trash"] = self.records["history"] + self.records["trash"]
         self.records["history"] = []
         self._save_records()
 
