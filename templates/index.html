@@ -147,7 +147,9 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 <div class="wrap">
   <header>
     <div class="logo">⬇</div>
-    <div><h1>下载器</h1><div class="sub">磁力 · 种子 · HTTP/HTTPS · FTP · 多任务</div></div>
+    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP</div></div>
+    <div style="flex:1"></div>
+    <button class="btn sm" id="settingsBtn" title="设置" style="font-size:18px;padding:6px 10px">⚙</button>
   </header>
 
   <div class="card">
@@ -175,33 +177,6 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     <div class="row" style="margin-top:12px;gap:8px">
       <button class="btn go" id="cxDownload">下载视频</button>
       <button class="btn" id="cxCancel">取消</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="settings-grid">
-      <div class="setting">
-        <label>并行任务数</label>
-        <input type="text" id="maxActive" value="3">
-      </div>
-      <div class="setting">
-        <label>每个任务下载线程</label>
-        <input type="text" id="connections" value="16">
-      </div>
-      <div class="setting">
-        <label>每个任务上传线程(BT)</label>
-        <input type="text" id="uploads" value="4">
-      </div>
-    </div>
-    <div class="row" style="margin-top:12px">
-      <div style="flex:1">
-        <div class="label" style="margin:0 0 5px 0">下载目录</div>
-        <div class="row">
-          <code class="dir" id="dest" style="flex:1;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;font-size:12px"></code>
-          <button class="btn sm" id="chooseDir">选择目录</button>
-        </div>
-      </div>
-      <button class="btn primary" id="applySettings" style="align-self:flex-end">保存设置</button>
     </div>
   </div>
 
@@ -233,6 +208,37 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     <div class="modal-foot">
       <button class="btn" id="confirmNo">取消</button>
       <button class="btn primary" id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="settingsOverlay" style="display:none">
+  <div class="modal" style="width:440px">
+    <div class="modal-head"><h3>设置</h3></div>
+    <div class="modal-body" style="padding:16px 20px">
+      <div class="setting">
+        <label>并行任务数</label>
+        <input type="text" id="maxActive" value="3">
+      </div>
+      <div class="setting">
+        <label>每个任务下载线程</label>
+        <input type="text" id="connections" value="16">
+      </div>
+      <div class="setting">
+        <label>每个任务上传线程(BT)</label>
+        <input type="text" id="uploads" value="4">
+      </div>
+      <div class="setting" style="margin-top:12px">
+        <label>下载目录</label>
+        <div class="row" style="gap:6px">
+          <code class="dir" id="dest" style="flex:1;padding:8px 10px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></code>
+          <button class="btn sm" id="chooseDir">选择</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot" style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end">
+      <button class="btn" id="settingsClose">关闭</button>
+      <button class="btn primary" id="applySettings">保存设置</button>
     </div>
   </div>
 </div>
@@ -693,9 +699,12 @@ async function confirmAdd(gid, action){
   switchTab('tasks');
 }
 
+// Settings modal
+$('settingsBtn').onclick=()=>{$('settingsOverlay').style.display='flex'};
+$('settingsClose').onclick=()=>{$('settingsOverlay').style.display='none'};
 $('applySettings').onclick=async()=>{
   await post('/api/settings',{max_active:+$('maxActive').value,connections:+$('connections').value,uploads:+$('uploads').value});
-  const o=$('applySettings').textContent;$('applySettings').textContent='已保存';setTimeout(()=>$('applySettings').textContent=o,1200);
+  $('settingsOverlay').style.display='none';
 };
 $('chooseDir').onclick=async()=>{
   const res=await post('/api/choose_dir');

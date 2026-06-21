@@ -1,0 +1,7 @@
+#!/bin/bash
+cd "/Users/shanfu/Documents/Codex/2026-06-19/yi/OpenXiaZai"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+lsof -ti:5566 | xargs kill -9 2>/dev/null
+lsof -ti:6800 | xargs kill -9 2>/dev/null
+sleep 0.5
+exec -a OpenXiaZai venv/bin/python launcher.py
