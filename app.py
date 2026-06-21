@@ -499,9 +499,13 @@ class Engine:
                     paths = [f.get("path", "") for f in files]
                     is_torrent_meta = any(
                         p.lower().endswith(".torrent") or
-                        re.match(r'^[0-9a-f]{40}\.torrent$', os.path.basename(p).lower()) is not None
+                        re.match(r'^[0-9a-f]{40}\.torrent$', os.path.basename(p).lower()) is not None or
+                        p.startswith("[METADATA]")
                         for p in paths
                     ) or bt_name.lower().endswith(".torrent")
+                    # Skip metadata-only tasks - they should never appear in history
+                    if is_torrent_meta:
+                        continue
                     self.tasks[gid] = {
                         "type": "torrent" if is_torrent_meta else "http",
                         "url": "",
@@ -897,6 +901,11 @@ class Engine:
                                 shutil.rmtree(cand)
                             except Exception:
                                 pass
+                # Also remove from aria2 session to prevent re-appearing on restart
+                try:
+                    self.aria.remove(gid)
+                except Exception:
+                    pass
                 self._save_records()
                 return True
         return False
