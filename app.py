@@ -10,7 +10,7 @@ import requests
 from flask import Flask, request, jsonify, render_template
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SAVE = os.path.expanduser("~/Downloads/magnet-downloads")
+DEFAULT_SAVE = os.path.expanduser("~/Downloads/OpenXiaZai")
 RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
 
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
@@ -1202,6 +1202,30 @@ def api_download_m3u8():
         return jsonify(ok=False, error="请输入 m3u8 地址"), 400
     gid = engine.start_m3u8_download(url, title or "视频下载")
     return jsonify(ok=True, gid=gid, type="m3u8")
+
+
+@app.route("/api/choose_dir", methods=["POST"])
+def api_choose_dir():
+    """打开系统原生文件夹选择对话框，返回选中的路径。"""
+    try:
+        script = '''
+        tell application "System Events"
+            activate
+            set folderPath to choose folder with prompt "选择下载目录"
+            return POSIX path of folderPath
+        end tell
+        '''
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            path = result.stdout.strip()
+            engine.set_destination(path)
+            return jsonify(ok=True, path=path)
+        return jsonify(ok=False, error="未选择目录")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
 
 
 if __name__ == "__main__":

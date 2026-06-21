@@ -194,8 +194,8 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       <div style="flex:1">
         <div class="label" style="margin:0 0 5px 0">下载目录</div>
         <div class="row">
-          <input type="text" id="dest" style="flex:1">
-          <button class="btn sm" id="applyDest">应用</button>
+          <code class="dir" id="dest" style="flex:1;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;font-size:12px"></code>
+          <button class="btn sm" id="chooseDir">选择目录</button>
         </div>
       </div>
       <button class="btn primary" id="applySettings" style="align-self:flex-end">保存设置</button>
@@ -664,9 +664,9 @@ $('applySettings').onclick=async()=>{
   await post('/api/settings',{max_active:+$('maxActive').value,connections:+$('connections').value,uploads:+$('uploads').value});
   const o=$('applySettings').textContent;$('applySettings').textContent='已保存';setTimeout(()=>$('applySettings').textContent=o,1200);
 };
-$('applyDest').onclick=async()=>{
-  await post('/api/destination',{path:$('dest').value.trim()});
-  const o=$('applyDest').textContent;$('applyDest').textContent='已应用';setTimeout(()=>$('applyDest').textContent=o,1200);
+$('chooseDir').onclick=async()=>{
+  const res=await post('/api/choose_dir');
+  if(res&&res.ok){$('dest').textContent=res.path}
 };
 
 // Clear all buttons
@@ -834,7 +834,7 @@ function render(s){
   $('maxActive').value=s.settings.max_active;
   $('connections').value=s.settings.connections;
   $('uploads').value=s.settings.uploads;
-  $('dest').value=s.settings.save_path;
+  $('dest').textContent=s.settings.save_path;
   const tp=$('pane-tasks');tp.innerHTML='';
   if(!s.tasks.length){tp.appendChild(empty('暂无下载任务。在上方粘贴链接开始。'))}
   else{s.tasks.forEach(t=>tp.appendChild(renderTask(t)))}
