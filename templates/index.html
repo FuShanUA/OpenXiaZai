@@ -789,7 +789,7 @@ function renderTask(t){
   el.innerHTML=html;
   el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
   el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
-  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('移除此任务？',{danger:true}))await post('/api/stop',{gid:t.gid})});
+  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('移除此任务？将移至回收站。',{danger:true}))await post('/api/stop',{gid:t.gid})});
   // File list toggle
   el.querySelector('.files-toggle')?.addEventListener('click',function(){
     this.classList.toggle('open');

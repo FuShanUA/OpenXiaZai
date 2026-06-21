@@ -637,6 +637,21 @@ class Engine:
     def stop(self, gid):
         info = self.tasks.get(gid)
         real_gid = info.get("converted_to", gid) if info else gid
+        # Save task info as a history record before removing
+        try:
+            s = self.aria.status(real_gid)
+            t = self._fmt_status(s)
+            if t:
+                rec = {
+                    "gid": gid, "type": t.get("type", "http"),
+                    "name": t.get("name", ""), "url": info.get("url", "") if info else "",
+                    "dir": t.get("dir", ""), "paths": t.get("paths", []),
+                    "size": t.get("size", 0), "completed_at": int(time.time()),
+                }
+                self.records["trash"].insert(0, rec)
+                self._save_records()
+        except Exception:
+            pass
         self.aria.remove(real_gid)
         if real_gid != gid:
             try:
