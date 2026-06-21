@@ -1,0 +1,1 @@
+.check:hover{border-color:var(--accent);box-shadow:0 0 4px rgba(79,157,255,0.3)}

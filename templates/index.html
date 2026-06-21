@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>下载器</title>
+<style>
+:root{
+  --bg:#0e1014; --panel:#161a22; --panel2:#1c212b; --border:#282e3a;
+  --text:#e6e8eb; --muted:#8b93a4; --accent:#4f9dff; --accent2:#34c759;
+  --warn:#ffb020; --danger:#ff5c5c; --hover:#222734;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  background:var(--bg);color:var(--text);line-height:1.5;font-size:14px}
+.wrap{max-width:920px;margin:0 auto;padding:24px 18px 60px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:22px}
+.logo{width:38px;height:38px;border-radius:9px;background:linear-gradient(135deg,#4f9dff,#7b61ff);
+  display:flex;align-items:center;justify-content:center;font-size:19px}
+header h1{font-size:19px;font-weight:600;margin:0}
+.sub{color:var(--muted);font-size:13px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px}
+input[type=text]{width:100%;background:var(--panel2);border:1px solid var(--border);
+  color:var(--text);padding:10px 12px;border-radius:8px;font-size:14px;outline:none}
+input[type=text]:focus{border-color:var(--accent)}
+.btn{border:1px solid var(--border);background:var(--panel2);color:var(--text);
+  padding:9px 14px;border-radius:8px;font-size:13px;cursor:pointer;font-weight:500;
+  display:inline-flex;align-items:center;gap:6px;transition:.15s}
+.btn:hover{background:var(--hover)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#3d8bed}
+.btn.go{background:var(--accent2);border-color:var(--accent2);color:#04150a}
+.btn.warn{background:var(--warn);border-color:var(--warn);color:#2a1a00}
+.btn.danger{border-color:#4a2a2a;color:var(--danger);background:transparent}
+.btn.danger:hover{background:#2a1717}
+.btn.sm{padding:5px 10px;font-size:12px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.label{font-size:12px;color:var(--muted);min-width:90px}
+.badge{font-size:11px;padding:2px 8px;border-radius:5px;background:var(--panel2);
+  border:1px solid var(--border);color:var(--accent)}
+.badge.torrent{color:#c9a3ff}.badge.http{color:#4f9dff}.badge.ftp{color:#34c759}
+.badge.unsup{color:var(--warn)}
+/* tabs */
+.tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
+.tab{padding:8px 16px;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;
+  border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.tab .count{background:var(--panel2);border:1px solid var(--border);padding:1px 7px;
+  border-radius:10px;font-size:11px;margin-left:5px}
+/* settings */
+.settings-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.setting label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+.setting input{padding:8px 10px}
+.hint{font-size:12px;color:var(--muted);margin-top:8px}
+/* task */
+.task{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:13px 14px;margin-bottom:10px}
+.task .top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.task .name{flex:1;min-width:0;font-weight:500;font-size:13px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.task .meta{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--muted);margin-top:7px;flex-wrap:wrap}
+.bar{height:6px;background:#1a1e28;border-radius:4px;overflow:hidden;margin-top:9px}
+.bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
+.state-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+.state-dot.downloading,.state-dot.fetching{background:var(--accent);animation:pulse 1.2s infinite}
+.state-dot.paused{background:var(--warn)}.state-dot.finished{background:var(--accent2)}
+.state-dot.error{background:var(--danger)}.state-dot.queued{background:var(--muted)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.files{margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+.file-row{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:12px}
+.file-row .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.file-row .fmeta{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.file-row .fbar{width:70px;height:4px;background:#1a1e28;border-radius:3px;overflow:hidden}
+.file-row .fbar > i{display:block;height:100%;background:var(--accent)}
+.files-toggle{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--accent);cursor:pointer;user-select:none;padding:4px 0;margin-top:4px}
+.files-toggle:hover{opacity:.8}
+.files-toggle .arrow{transition:transform .2s;display:inline-block}
+.files-toggle.open .arrow{transform:rotate(90deg)}
+.file-list-wrap{display:none;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}
+.file-list-wrap.open{display:block}
+.check{appearance:none;width:18px;height:18px;border:2px solid var(--border);border-radius:5px;
+  cursor:pointer;flex-shrink:0;position:relative;background:var(--panel);transition:.15s}
+.check:checked{background:var(--accent);border-color:var(--accent)}
+.check:checked::after{content:"";position:absolute;left:4px;width:6px;height:11px;
+  border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);top:1px}
+.empty{text-align:center;color:var(--muted);padding:40px 10px;font-size:14px}
+.clear-bar{padding:8px 0;display:flex;gap:6px;flex-wrap:wrap}
+code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;word-break:break-all}
+.rec{display:flex;align-items:center;gap:10px;padding:11px 13px;background:var(--panel2);
+  border:1px solid var(--border);border-radius:9px;margin-bottom:8px}
+.rec .info{flex:1;min-width:0}
+.rec .rname{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec .rsub{font-size:11px;color:var(--muted);margin-top:2px}
+.pill{font-variant-numeric:tabular-nums;font-size:11px;color:var(--muted)}
+/* modal */
+.modal-overlay{position:absolute;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-start;justify-content:center;padding-top:28px}
+.modal-overlay:nth-child(2){padding-top:48px}
+.modal-overlay:nth-child(3){padding-top:68px}
+.modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:680px;max-width:94vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.modal-head{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:grab;user-select:none}
+.modal-head:active{cursor:grabbing}
+.modal-head h3{margin:0;font-size:15px;flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.modal-body{padding:0 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column}
+.modal-foot{border-top:1px solid var(--border);padding:0}
+.drag-handle{cursor:grab}
+.drag-handle:active{cursor:grabbing}
+/* file picker */
+.picker-toolbar{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.picker-filter{display:flex;gap:2px;flex-wrap:wrap}
+.picker-filter .ftab{padding:5px 14px;border-radius:6px;font-size:12px;cursor:pointer;color:var(--muted);background:transparent;border:1px solid transparent;transition:.15s;user-select:none}
+.picker-filter .ftab:hover{color:var(--text);background:var(--hover)}
+.picker-filter .ftab.active{color:var(--accent);background:rgba(79,157,255,.1);border-color:var(--accent)}
+.picker-list{flex:1;overflow-y:auto;min-height:140px;max-height:340px}
+.pick-row{display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border);font-size:13px;transition:background .1s}
+.pick-row:hover{background:var(--hover)}
+.pick-row:last-child{border-bottom:none}
+.pick-row .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pick-row .fsize{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums;font-size:12px;min-width:70px;text-align:right}
+.pick-icon{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.pick-icon.video{background:rgba(255,92,92,.15);color:#ff5c5c}
+.pick-icon.audio{background:rgba(255,176,32,.15);color:#ffb020}
+.pick-icon.image{background:rgba(52,199,89,.15);color:#34c759}
+.pick-icon.doc{background:rgba(79,157,255,.15);color:#4f9dff}
+.pick-icon.folder{background:rgba(201,163,255,.15);color:#c9a3ff}
+.pick-icon.other{background:rgba(139,147,164,.15);color:#8b93a4}
+.picker-summary{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-top:1px solid var(--border);font-size:13px;flex-wrap:wrap;gap:8px}
+.picker-summary .sel-info{color:var(--text);font-weight:500}
+.picker-summary .disk-info{color:var(--muted);font-size:12px}
+.picker-save{display:flex;align-items:center;gap:10px;padding:10px 0;font-size:13px;border-top:1px solid var(--border)}
+.picker-save label{color:var(--muted);white-space:nowrap;font-size:12px}
+.picker-save .dir-display{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;background:var(--panel2);padding:6px 10px;border-radius:6px;border:1px solid var(--border)}
+.picker-actions{display:flex;gap:10px;justify-content:flex-end;padding:14px 0}
+.spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;vertical-align:middle;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.info-text{color:var(--muted);font-size:13px;text-align:center;padding:40px 10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">⬇</div>
+    <div><h1>下载器</h1><div class="sub">磁力 · 种子 · HTTP/HTTPS · FTP · 多任务</div></div>
+  </header>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="url" placeholder="粘贴链接：magnet:、ed2k://、http(s)://、ftp://、夸克网盘…" style="flex:1">
+      <button class="btn primary" id="addBtn">添加下载</button>
+    </div>
+    <div id="typeHint" class="hint" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <div class="settings-grid">
+      <div class="setting">
+        <label>并行任务数</label>
+        <input type="text" id="maxActive" value="3">
+      </div>
+      <div class="setting">
+        <label>每个任务下载线程</label>
+        <input type="text" id="connections" value="16">
+      </div>
+      <div class="setting">
+        <label>每个任务上传线程(BT)</label>
+        <input type="text" id="uploads" value="4">
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div style="flex:1">
+        <div class="label" style="margin:0 0 5px 0">下载目录</div>
+        <div class="row">
+          <input type="text" id="dest" style="flex:1">
+          <button class="btn sm" id="applyDest">应用</button>
+        </div>
+      </div>
+      <button class="btn primary" id="applySettings" style="align-self:flex-end">保存设置</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="tasks">下载任务<span class="count" id="cTasks">0</span></div>
+    <div class="tab" data-tab="history">下载记录<span class="count" id="cHist">0</span></div>
+    <div class="tab" data-tab="trash">回收站<span class="count" id="cTrash">0</span></div>
+  </div>
+
+  <div id="pane-tasks"></div>
+  <div id="pane-history" style="display:none"></div>
+  <div id="pane-trash" style="display:none"></div>
+  <div class="clear-bar" id="clearTasks" style="display:none"><button class="btn sm go" id="resumeAllBtn">开始全部任务</button><button class="btn sm danger" id="clearTasksBtn">停止全部任务</button></div>
+  <div class="clear-bar" id="clearHist" style="display:none"><button class="btn sm danger" id="clearHistBtn">清空下载记录</button></div>
+  <div class="clear-bar" id="clearTrash" style="display:none"><button class="btn sm danger" id="clearTrashBtn">清空回收站</button><button class="btn sm danger" id="clearTrashFilesBtn" style="margin-left:6px">清空回收站并删除文件</button></div>
+</div>
+<div id="modalContainer" style="position:fixed;inset:0;pointer-events:none;z-index:100"></div>
+<!-- template for file picker modals -->
+<template id="modalTemplate">
+<div class="modal-overlay" style="pointer-events:auto">
+  <div class="modal" style="width:680px;max-width:94vw;max-height:85vh"><div class="modal-head drag-handle"><h3 class="modal-title"></h3><span class="pill modal-size"></span></div><div class="modal-body"></div><div class="modal-foot"></div></div>
+</div>
+</template>
+
+<div class="modal-overlay" id="confirmOverlay" style="display:none">
+  <div class="modal" style="width:420px">
+    <div class="modal-head"><h3 id="confirmTitle">确认操作</h3></div>
+    <div class="modal-body"><p id="confirmMsg" style="margin:8px 0;font-size:14px;line-height:1.6;white-space:pre-wrap"></p></div>
+    <div class="modal-foot">
+      <button class="btn" id="confirmNo">取消</button>
+      <button class="btn primary" id="confirmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const TYPES={torrent:"种子/磁力",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷"};
+const UNSUP={ed2k:1,quark:1,cloud:1,thunder:1};
+let activeTab='tasks';
+let cur=null;
+const openFiles=new Set();  // track which task file lists are expanded
+const fmtB=b=>{if(!b)return '0 B';const u=['B','KB','MB','GB','TB'];let i=0,v=b;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(i?1:0)+' '+u[i]};
+const fmtR=b=>b>0?'↓ '+fmtB(b)+'/s':'';
+async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});if(!r.ok)throw new Error('HTTP '+r.status);return await r.json()}catch(e){console.error('POST '+u+' failed:',e);return{ok:false,error:'请求失败: '+e.message}}}
+function esc(s){return (s||'').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}
+
+
+// in-app confirm/alert dialogs (avoids native OS dialog with Python icon)
+function customConfirm(message, opts){
+  opts=opts||{};
+  return new Promise(resolve=>{
+    $('confirmMsg').textContent=message;
+    $('confirmTitle').textContent=opts.title||'确认操作';
+    const okBtn=$('confirmOk'),noBtn=$('confirmNo');
+    okBtn.textContent=opts.okText||'确定';
+    noBtn.textContent=opts.cancelText||'取消';
+    okBtn.className=opts.danger?'btn danger':'btn primary';
+    noBtn.style.display='';
+    $('confirmOverlay').style.display='flex';
+    okBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(true)};
+    noBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(false)};
+  });
+}
+function customAlert(message, opts){
+  opts=opts||{};
+  return new Promise(resolve=>{
+    $('confirmMsg').textContent=message;
+    $('confirmTitle').textContent=opts.title||'提示';
+    const okBtn=$('confirmOk'),noBtn=$('confirmNo');
+    okBtn.textContent=opts.okText||'确定';
+    okBtn.className='btn primary';
+    noBtn.style.display='none';
+    $('confirmOverlay').style.display='flex';
+    okBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(true)};
+  });
+}
+
+
+// live link-type detection
+$('url').addEventListener('input',()=>{
+  const v=$('url').value.trim().toLowerCase();
+  const h=$('typeHint');
+  if(!v){h.style.display='none';return}
+  let t='http';
+  if(v.startsWith('magnet:'))t='torrent';
+  else if(v.startsWith('ftp')||v.startsWith('sftp'))t='ftp';
+  else if(v.startsWith('ed2k'))t='ed2k';
+  else if(v.includes('quark.cn'))t='quark';
+  else if(v.startsWith('thunder'))t='thunder';
+  else if(v.startsWith('http'))t='http';
+  h.style.display='block';
+  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'');
+});
+
+$('addBtn').onclick=async()=>{
+  const url=$('url').value.trim();
+  if(!url){return}
+  $('addBtn').disabled=true;$('addBtn').textContent='添加中…';
+  try{
+    const res=await post('/api/add',{url});
+    if(!res||res.ok===false){await customAlert(res?.error||'添加失败，请检查链接或后端服务');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
+    $('url').value='';$('typeHint').style.display='none';
+    if(res.type==='torrent'){
+      showFileModal(res.gid);
+    } else {
+      switchTab('tasks');
+    }
+  }catch(e){
+    await customAlert('添加失败: '+e.message);
+  }
+  $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+};
+
+// Enter key in URL input triggers add
+$('url').addEventListener('keydown',e=>{if(e.key==='Enter')$('addBtn').click()});
+
+// ---- file selection modal (multi, draggable, stackable) ----
+const modalStates={};  // gid -> {overlay, timer, startTime}
+const MAX_MODALS=3;
+
+function closeModal(gid){
+  const st=modalStates[gid];
+  if(!st)return;
+  if(st.timer){clearTimeout(st.timer);st.timer=null}
+  if(st.overlay&&st.overlay.parentNode)st.overlay.parentNode.removeChild(st.overlay);
+  delete modalStates[gid];
+}
+function cancelModal(gid){
+  if(gid){post('/api/stop',{gid:gid})}
+  closeModal(gid);
+}
+
+async function showFileModal(gid){
+  // Limit concurrent modals
+  const active=Object.keys(modalStates).length;
+  if(active>=MAX_MODALS){await customAlert('已达到最大并行任务数('+MAX_MODALS+')，请先处理现有任务');return}
+
+  const tmpl=document.getElementById('modalTemplate');
+  const overlay=tmpl.content.firstElementChild.cloneNode(true);
+  overlay.setAttribute('data-gid',gid);
+  overlay.querySelector('.modal-title').textContent='新建BT任务';
+  overlay.querySelector('.modal-body').innerHTML='<div class="info-text"><span class="spinner"></span>正在获取种子元数据…</div>';
+  overlay.querySelector('.modal-foot').innerHTML='<button class="btn sm" onclick="cancelModal(\''+gid+'\')">取消</button>';
+
+  // Drag support
+  let dragging=false,dx=0,dy=0;
+  const modal=overlay.querySelector('.modal');
+  const handle=overlay.querySelector('.drag-handle');
+  handle.addEventListener('mousedown',e=>{
+    dragging=true;dx=e.clientX-modal.offsetLeft;dy=e.clientY-modal.offsetTop;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    modal.style.position='relative';
+    modal.style.left=(e.clientX-dx)+'px';
+    modal.style.top=(e.clientY-dy)+'px';
+  });
+  document.addEventListener('mouseup',()=>{dragging=false});
+
+  document.getElementById('modalContainer').appendChild(overlay);
+  modalStates[gid]={overlay, timer:null, startTime:Date.now()};
+  pollModalFiles(gid);
+}
+
+function pollModalFiles(gid){
+  const st=modalStates[gid];
+  if(!st)return;
+  st.timer=setTimeout(async()=>{
+    if(!modalStates[gid])return;
+    try{
+      const s=await(await fetch('/api/status')).json();
+      const t=(s.pending||[]).find(t=>t.gid===gid)||s.tasks.find(t=>t.gid===gid);
+      if(t&&t.has_metadata&&t.files&&t.files.length>0){renderFilePicker(gid,t);return}
+      const elapsed=Math.round((Date.now()-(st.startTime||Date.now()))/1000);
+      let info='<span class="spinner"></span>正在获取种子元数据…';
+      if(t&&t.metadata_progress){info+='（'+t.metadata_progress+'%）'}
+      info+='<br><span style="font-size:12px;opacity:.7">节点：'+(t?t.peers:0)+' · 用时 '+elapsed+' 秒</span>';
+      if(elapsed>45){info+='<br><span style="font-size:12px;opacity:.6">种子可能缺少做种者，请耐心等待或尝试其他链接。</span>'}
+      const st2=modalStates[gid];if(!st2)return;
+      st2.overlay.querySelector('.modal-body').innerHTML='<div class="info-text">'+info+'</div>';
+      pollModalFiles(gid);
+    }catch(e){pollModalFiles(gid)}
+  },1500);
+}
+
+function renderFilePicker(gid, t){
+  const st=modalStates[gid];
+  if(!st)return;
+  if(st.timer){clearTimeout(st.timer);st.timer=null}
+  const total=t.files.reduce((s,f)=>s+f.size,0);
+  st.overlay.querySelector('.modal-title').textContent=t.name||'新建BT任务';
+  // Build file type filter
+  const cats=getFileCategories(t.files);
+  let filterHtml='<div class="picker-toolbar">';
+  filterHtml+='<div class="picker-filter">';
+  filterHtml+='<span class="ftab active" data-cat="all">全部</span>';
+  for(const [cat,info] of Object.entries(cats)){
+    if(info.count>0)filterHtml+='<span class="ftab" data-cat="'+cat+'">'+info.label+'</span>';
+  }
+  filterHtml+='</div>';
+  filterHtml+='<button class="btn sm" id="mSelAll_'+gid+'">全选</button>';
+  filterHtml+='</div>';
+  // File list
+  let listHtml='<div class="picker-list" id="pickList_'+gid+'">';
+  t.files.forEach(f=>{
+    const cat=getFileCat(f.name);
+    const icon=getFileIcon(cat);
+    listHtml+='<div class="pick-row" data-cat="'+cat+'">'
+      +'<input type="checkbox" class="check modal-check" data-i="'+f.index+'" checked>'
+      +'<span class="pick-icon '+cat+'">'+icon+'</span>'
+      +'<span class="fname" title="'+esc(f.name)+'">'+esc(f.name)+'</span>'
+      +'<span class="fsize">'+fmtB(f.size)+'</span></div>';
+  });
+  listHtml+='</div>';
+  // Summary
+  let summaryHtml='<div class="picker-summary">';
+  summaryHtml+='<span class="sel-info" id="pickSummary_'+gid+'">已选中 '+t.files.length+' 个文件，共 '+fmtB(total)+'</span>';
+  summaryHtml+='<span class="disk-info" id="pickDisk_'+gid+'">保存至：'+(cur&&cur.settings?esc(cur.settings.save_path):'~/Downloads')+'</span>';
+  summaryHtml+='</div>';
+  // Actions
+  let actionHtml='<div class="picker-actions">';
+  actionHtml+='<button class="btn sm" onclick="cancelModal(\''+gid+'\')">取消</button>';
+  actionHtml+='<button class="btn warn" id="mQueue_'+gid+'">添加到队列</button>';
+  actionHtml+='<button class="btn go" id="mDownload_'+gid+'">立即下载</button>';
+  actionHtml+='</div>';
+  st.overlay.querySelector('.modal-body').innerHTML=filterHtml+listHtml+summaryHtml;
+  st.overlay.querySelector('.modal-foot').innerHTML=actionHtml;
+  // Bind events
+  document.getElementById('mSelAll_'+gid).onclick=()=>{
+    st.overlay.querySelectorAll('.modal-check').forEach(c=>c.checked=true);
+    updatePickSummary(gid, t.files);
+  };
+  st.overlay.querySelectorAll('.modal-check').forEach(c=>c.addEventListener('change',()=>updatePickSummary(gid, t.files)));
+  st.overlay.querySelectorAll('.ftab').forEach(tab=>{
+    tab.addEventListener('click',()=>{
+      st.overlay.querySelectorAll('.ftab').forEach(t=>t.classList.remove('active'));
+      tab.classList.add('active');
+      const cat=tab.dataset.cat;
+      st.overlay.querySelectorAll('.pick-row').forEach(row=>{
+        row.style.display=(cat==='all'||row.dataset.cat===cat)?'':'none';
+      });
+    });
+  });
+  document.getElementById('mQueue_'+gid).onclick=()=>confirmAdd(gid,'queue');
+  document.getElementById('mDownload_'+gid).onclick=()=>confirmAdd(gid,'download');
+}
+function updatePickSummary(gid, files){
+  const st=modalStates[gid];if(!st)return;
+  const checks=st.overlay.querySelectorAll('.modal-check');
+  let selCount=0,selSize=0;
+  checks.forEach(c=>{
+    if(c.checked){
+      const idx=parseInt(c.dataset.i);
+      if(files[idx]){selCount++;selSize+=files[idx].size;}
+    }
+  });
+  const el=document.getElementById('pickSummary_'+gid);
+  if(el)el.textContent='已选中 '+selCount+' 个文件，共 '+fmtB(selSize);
+}
+async function confirmAdd(gid, action){
+  const st=modalStates[gid];if(!st)return;
+  const idx=[...st.overlay.querySelectorAll('.modal-check')].filter(c=>c.checked).map(c=>+c.dataset.i);
+  await post('/api/confirm',{gid,indices:idx,action});
+  closeModal(gid);
+  switchTab('tasks');
+}
+
+$('applySettings').onclick=async()=>{
+  await post('/api/settings',{max_active:+$('maxActive').value,connections:+$('connections').value,uploads:+$('uploads').value});
+  const o=$('applySettings').textContent;$('applySettings').textContent='已保存';setTimeout(()=>$('applySettings').textContent=o,1200);
+};
+$('applyDest').onclick=async()=>{
+  await post('/api/destination',{path:$('dest').value.trim()});
+  const o=$('applyDest').textContent;$('applyDest').textContent='已应用';setTimeout(()=>$('applyDest').textContent=o,1200);
+};
+
+// Clear all buttons
+$('resumeAllBtn').onclick=async()=>{
+  if(!cur||!cur.tasks)return;
+  for(const t of cur.tasks){
+    if(t.state==='paused')await post('/api/resume',{gid:t.gid});
+  }
+};
+$('clearTasksBtn').onclick=async()=>{
+  if(!await customConfirm('确定要停止并移除全部下载任务吗？',{danger:true}))return;
+  await post('/api/clear_tasks');
+};
+$('clearHistBtn').onclick=async()=>{
+  if(!await customConfirm('确定要清空全部下载记录吗？',{danger:true}))return;
+  await post('/api/clear_history');
+};
+$('clearTrashBtn').onclick=async()=>{
+  if(!await customConfirm('确定要清空回收站吗？（保留已下载文件）',{danger:true}))return;
+  await post('/api/clear_trash',{delete_files:false});
+};
+$('clearTrashFilesBtn').onclick=async()=>{
+  if(!await customConfirm('确定要清空回收站并删除所有已下载文件吗？此操作不可恢复！',{title:'彻底删除',okText:'彻底删除',danger:true}))return;
+  await post('/api/clear_trash',{delete_files:true});
+};
+
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>switchTab(t.dataset.tab));
+function switchTab(name){activeTab=name;document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
+  ['tasks','history','trash'].forEach(p=>$('pane-'+p).style.display=p===name?'block':'none');
+  ['clearTasks','clearHist','clearTrash'].forEach(id=>$(id).style.display='none');
+  if(name==='tasks')$('clearTasks').style.display=cur&&cur.tasks.length?'block':'none';
+  if(name==='history')$('clearHist').style.display=cur&&cur.history.length?'block':'none';
+  if(name==='trash')$('clearTrash').style.display=cur&&cur.trash.length?'block':'none';
+}
+
+function tBtn(label,cls,fn){const b=document.createElement('button');b.className='btn sm '+cls;b.textContent=label;b.onclick=fn;return b}
+
+function renderTask(t){
+  const el=document.createElement('div');el.className='task';
+  let html='<div class="top">'
+    +'<span class="state-dot '+t.state+'"></span>'
+    +'<span class="badge '+t.type+'">'+(TYPES[t.type]||t.type)+'</span>'
+    +'<span class="name" title="'+esc(t.name)+'">'+esc(t.name)+'</span>'
+    +'<span class="pill">'+(t.progress||0).toFixed(0)+'%</span>'
+    +'</div>'
+    +'<div class="meta">'
+    +'<span>'+fmtB(t.size)+'</span>'
+    +'<span>'+fmtR(t.download_rate)+'</span>'
+    +(t.type==='torrent'?'<span>↑ '+fmtR(t.upload_rate)+'</span>':'')
+    +(t.peers?'<span>'+t.peers+' 节点</span>':'')
+    +'<span class="state-dot '+t.state+'"></span><span>'+({downloading:'下载中',paused:'已暂停',finished:'已完成',error:'错误',queued:'排队中',removed:'已移除',fetching:'获取中'})[t.state]||t.state+'</span>'
+    +'</div>'
+    +'<div class="bar"><i style="width:'+(t.progress||0)+'%"></i></div>';
+  // Only show selected files, collapsed by default
+  const selFiles=(t.files||[]).filter(f=>f.selected);
+  const hasFiles=selFiles.length>0;
+  if(hasFiles){
+    const fid='flist_'+t.gid;
+    html+='<div class="files-toggle" data-fid="'+fid+'"><span class="arrow">▶</span> '+selFiles.length+' 个文件</div>';
+    html+='<div class="file-list-wrap" id="'+fid+'">';
+    selFiles.forEach(f=>{
+      html+='<div class="file-row">'
+        +'<span style="width:18px"></span>'
+        +'<span class="fname" title="'+esc(f.name)+'">'+esc(f.name)+'</span>'
+        +'<span class="fmeta">'+fmtB(f.size)+'</span>'
+        +'<span class="fbar"><i style="width:'+(f.progress||0)+'%"></i></span>'
+        +'</div>';
+    });
+    html+='</div>';
+  }
+  html+='<div class="row" style="margin-top:10px">';
+  if(t.state==='downloading'||t.state==='fetching')html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
+  if(t.state==='paused')html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">继续</button>';
+  html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">移除</button>';
+  html+='<span class="pill"><code class="dir">'+esc(t.dir||'')+'</code></span></div>';
+  el.innerHTML=html;
+  el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
+  el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
+  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('移除此任务？',{danger:true}))await post('/api/stop',{gid:t.gid})});
+  // File list toggle
+  el.querySelector('.files-toggle')?.addEventListener('click',function(){
+    this.classList.toggle('open');
+    const fid=this.dataset.fid;
+    const wrap=document.getElementById(fid);
+    if(wrap)wrap.classList.toggle('open');
+    // Persist toggle state
+    if(this.classList.contains('open'))openFiles.add(fid);else openFiles.delete(fid);
+  });
+  return el;
+}
+function renderHistory(r){
+  const el=document.createElement('div');el.className='rec';
+  el.innerHTML='<span class="badge '+r.type+'">'+(TYPES[r.type]||r.type)+'</span>'
+    +'<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
+    +'<div class="rsub">'+fmtB(r.size||0)+' · '+new Date((r.completed_at||0)*1000).toLocaleString()+'</div></div>';
+  const a=tBtn('移到回收站','danger',async()=>{await post('/api/trash',{gid:r.gid});poll()});
+  el.appendChild(a);return el;
+}
+function renderTrash(r){
+  const el=document.createElement('div');el.className='rec';
+  el.innerHTML='<span class="badge '+r.type+'">'+(TYPES[r.type]||r.type)+'</span>'
+    +'<div class="info"><div class="rname" title="'+esc(r.name)+'">'+esc(r.name)+'</div>'
+    +'<div class="rsub">'+fmtB(r.size||0)+(r.paths&&r.paths.length?' · '+r.paths.length+' 个文件':'')+'</div></div>';
+  el.appendChild(tBtn('恢复','sm',async()=>{await post('/api/restore',{gid:r.gid});poll()}));
+  el.appendChild(tBtn('彻底删除','danger',async()=>{
+    if(await customConfirm('彻底删除？将同时删除已下载的文件/文件夹，且不可恢复。',{title:'彻底删除',okText:'彻底删除',danger:true})){await post('/api/purge',{gid:r.gid});poll()}}));
+  return el;
+}
+
+function empty(msg){const e=document.createElement('div');e.className='empty';e.textContent=msg;return e}
+
+// File type helpers
+function getFileCat(name){
+  const n=name.toLowerCase();
+  if(/\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|m2ts)$/.test(n))return 'video';
+  if(/\.(mp3|aac|flac|wav|ogg|wma|m4a|opus)$/.test(n))return 'audio';
+  if(/\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff|psd)$/.test(n))return 'image';
+  if(/\.(txt|md|pdf|doc|docx|ppt|pptx|xls|xlsx|csv|rtf|nfo|sfv)$/.test(n))return 'doc';
+  if(/\.(srt|ass|ssa|sub|vtt|idx)$/.test(n))return 'doc';
+  return 'other';
+}
+function getFileIcon(cat){
+  const icons={video:'🎬',audio:'🎵',image:'🖼',doc:'📄',folder:'📁',other:'📦'};
+  return icons[cat]||'📦';
+}
+function getFileCategories(files){
+  const cats={};
+  const labels={video:'视频',audio:'音乐',image:'图片',doc:'文档',other:'其他'};
+  files.forEach(f=>{
+    const cat=getFileCat(f.name);
+    if(!cats[cat])cats[cat]={count:0,size:0,label:labels[cat]||cat};
+    cats[cat].count++;cats[cat].size+=f.size;
+  });
+  return cats;
+}
+function updatePickSummary(files){
+  const checks=document.querySelectorAll('.modal-check');
+  let selCount=0,selSize=0;
+  checks.forEach(c=>{
+    if(c.checked){
+      const idx=parseInt(c.dataset.i);
+      if(files[idx]){selCount++;selSize+=files[idx].size;}
+    }
+  });
+  const el=document.getElementById('pickSummary');
+  if(el)el.textContent='已选中 '+selCount+' 个文件，共 '+fmtB(selSize);
+}
+async function fetchDiskSpace(){
+  try{
+    // Try to get disk space for the save directory
+    const resp=await fetch('/api/status');
+    const s=await resp.json();
+    const dir=s.settings.save_path;
+    const el=document.getElementById('pickDisk');
+    if(el)el.textContent='保存至：'+dir;
+  }catch(e){}
+}
+let lastTasks=[];
+async function poll(){
+  try{const r=await fetch('/api/status');if(!r.ok)throw new Error('HTTP '+r.status);const s=await r.json();cur=s;render(s)}catch(e){console.error('poll failed:',e)}
+}
+function render(s){
+  $('maxActive').value=s.settings.max_active;
+  $('connections').value=s.settings.connections;
+  $('uploads').value=s.settings.uploads;
+  $('dest').value=s.settings.save_path;
+  const tp=$('pane-tasks');tp.innerHTML='';
+  if(!s.tasks.length){tp.appendChild(empty('暂无下载任务。在上方粘贴链接开始。'))}
+  else{s.tasks.forEach(t=>tp.appendChild(renderTask(t)))}
+  // Restore open file lists
+  document.querySelectorAll('.files-toggle').forEach(ft=>{
+    const fid=ft.dataset.fid;
+    if(openFiles.has(fid)){ft.classList.add('open');const w=document.getElementById(fid);if(w)w.classList.add('open')}
+  });
+  $('clearTasks').style.display=(s.tasks.length&&activeTab==='tasks')?'block':'none';
+  $('cTasks').textContent=s.tasks.length;
+
+  const hp=$('pane-history');hp.innerHTML='';
+  if(!s.history.length){hp.appendChild(empty('暂无下载记录'))}
+  else{s.history.forEach(r=>hp.appendChild(renderHistory(r)))}
+  $('clearHist').style.display=(s.history.length&&activeTab==='history')?'block':'none';
+  $('cHist').textContent=s.history.length;
+
+  const rp=$('pane-trash');rp.innerHTML='';
+  if(!s.trash.length){rp.appendChild(empty('回收站为空'))}
+  else{s.trash.forEach(r=>rp.appendChild(renderTrash(r)))}
+  $('clearTrash').style.display=(s.trash.length&&activeTab==='trash')?'block':'none';
+  $('cTrash').textContent=s.trash.length;
+}
+poll();setInterval(poll,1500);
+</script>
+</body>
+</html>
