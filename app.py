@@ -543,13 +543,11 @@ class Engine:
                         self.tasks[gid] = {"type": t, "url": url, "submitted": True,
                                            "picked": False, "pending": True,
                                            "added_at": time.time()}
-                        # Check if output files already exist
                         existing_files = self._check_existing_files(ih)
                         return {"ok": True, "gid": gid, "type": t,
                                 "cached": True, "existing_files": existing_files}
                     except Exception:
                         pass  # fall through to normal magnet add
-            # Check for existing files even for new magnet adds
             if ih:
                 existing_files = self._check_existing_files(ih)
         gid = self.aria.add(url, opts)
@@ -710,15 +708,14 @@ class Engine:
                     "selected": int(f.get("selected", "false") == "true") if f.get("selected") else 0,
                     "progress": round(100 * fdone / flen, 1) if flen else 0,
                 })
-            # Metadata is ready ONLY when aria2 reports the info dictionary name.
-            # Without bt-metadata-only, placeholder files appear before real metadata.
+            # Metadata is ready when aria2 reports the info dictionary name.
             has_metadata = bool(bt_info.get("name"))
             state_map = {"active": "downloading", "waiting": "queued",
                          "paused": "paused", "complete": "finished",
                          "removed": "removed", "error": "error"}
             return {
                 "gid": gid,
-                "type": info.get("type", classify(info.get("url", ""))),
+                "type": info.get("type") or ("torrent" if (bt_info and bt_info.get("name")) else classify(info.get("url", ""))),
                 "name": name,
                 "state": state_map.get(st, st),
                 "progress": round(100 * done / total, 1) if total else 0,
@@ -788,6 +785,13 @@ class Engine:
                     continue
 
                 is_pending = info and info.get("pending") and not info.get("picked")
+                # If a new torrent task appears (auto-created by aria2 from magnet),
+                # mark it as pending for file picking.
+                if not info and t["type"] == "torrent" and t.get("has_metadata") and t.get("files"):
+                    self.tasks[t["gid"]] = {"type": "torrent", "url": "", "submitted": True,
+                                            "picked": False, "pending": True}
+                    info = self.tasks[t["gid"]]
+                    is_pending = True
                 # Auto-pause pending torrent once metadata resolves & files appear.
                 if is_pending and t["type"] == "torrent":
                     if t.get("has_metadata") and t.get("files") and len(t["files"]) > 0:
