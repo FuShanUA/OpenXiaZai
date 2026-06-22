@@ -6,7 +6,6 @@ import base64
 import subprocess
 import re
 import hashlib
-import socket
 import threading
 import requests
 from flask import Flask, request, jsonify, render_template
@@ -292,7 +291,7 @@ TYPES = {
     "torrent": "种子/磁力",
     "http": "HTTP 直链",
     "ftp": "FTP",
-    "ed2k": "电驴 eD2k",
+    "ed2k": "电驴→种子搜索",
     "quark": "夸克网盘",
     "cloud": "网盘链接",
     "thunder": "迅雷链接",
@@ -410,290 +409,103 @@ class Aria2:
 
 
 # --------------------------------------------------------------------------- #
-#  aMule daemon client (ed2k download backend)
+#  ed2k link → magnet/torrent converter
 # --------------------------------------------------------------------------- #
-class AMuleDaemon:
-    """Manage amuled daemon and communicate via amulecmd for ed2k downloads."""
+def parse_ed2k_url(url):
+    """Parse an ed2k:// link to extract file name, size, and hash."""
+    m = re.match(
+        r'ed2k://\|file\|([^|]+)\|(\d+)\|([A-Fa-f0-9]{32})\|',
+        url.strip()
+    )
+    if m:
+        return {
+            "name": m.group(1),
+            "size": int(m.group(2)),
+            "hash": m.group(3).upper(),
+        }
+    return None
 
-    def __init__(self, save_path):
-        self.save_path = save_path
-        self.proc = None
-        self.home = os.path.expanduser("~/.aMule")
-        self.ec_port = 4712
-        self.ec_passwd = "openxiazai"
-        self._ensure_config()
-        self._start_daemon()
 
-    def _ensure_config(self):
-        """Write aMule preferences to ensure EC is enabled and paths are set.
-        Must be done BEFORE starting the daemon, because amuled reads config at startup."""
-        os.makedirs(self.home, exist_ok=True)
-        prefs_path = os.path.join(self.home, "amule.conf")
-        pw_md5 = hashlib.md5(self.ec_passwd.encode("utf-8")).hexdigest()
-        pw_double_md5 = hashlib.md5(pw_md5.encode("utf-8")).hexdigest()
+def search_magnet_for_ed2k(file_name, file_size):
+    """Search for a magnet/torrent link for the same file as an ed2k link.
 
-        if not os.path.exists(prefs_path):
-            # First time — let amuled generate default config, then we'll patch it
-            # We need to start amuled briefly just to generate the config file,
-            # then kill it, patch, and restart.
-            amuled = shutil.which("amuled") or "amuled"
-            try:
-                proc = subprocess.Popen([amuled, "-f"],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                # Wait for config file to appear
-                for _ in range(40):
-                    if os.path.exists(prefs_path):
-                        break
-                    time.sleep(0.25)
-                try:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
-            except FileNotFoundError:
-                return
+    This is a best-effort search — ed2k and BitTorrent use different hash
+    algorithms (MD4 vs SHA1), so direct conversion is impossible. We search
+    by file name on public torrent indexes, but many sites are geo-blocked
+    or Cloudflare-protected, so this may fail.
+    """
+    import urllib.parse
 
-        # Now patch the config (whether newly generated or already existing)
-        self._patch_ec_config(pw_double_md5)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+    }
 
-    def _patch_ec_config(self, pw_double_md5):
-        """Patch amule.conf: enable EC, set password, set save dir."""
-        prefs_path = os.path.join(self.home, "amule.conf")
-        if not os.path.exists(prefs_path):
-            return
+    # Clean up file name for search
+    search_name = re.sub(r'\.\w{1,4}$', '', file_name)
+    search_query = re.sub(r'[\.\-_]+', ' ', search_name).strip()
+    if len(search_query) > 60:
+        search_query = search_query[:60]
+
+    # Torrent index sites — try each, accept any that works
+    search_sources = [
+        f"https://1337x.to/search/{urllib.parse.quote_plus(search_query)}/1/",
+        f"https://torrentgalaxy.to/torrents.php?search={urllib.parse.quote_plus(search_query)}&sort=seeders&order=desc",
+    ]
+
+    for search_url in search_sources:
         try:
-            with open(prefs_path, "r") as f:
-                lines = f.readlines()
-
-            new_lines = []
-            in_ec_section = False
-            found_ec_section = False
-
-            for line in lines:
-                stripped = line.strip()
-                if stripped == "[ExternalConnect]":
-                    in_ec_section = True
-                    found_ec_section = True
-                elif stripped.startswith("[") and stripped.endswith("]") and stripped != "[ExternalConnect]":
-                    if in_ec_section:
-                        in_ec_section = False
-
-                if in_ec_section:
-                    if stripped.startswith("AcceptExternalConnections="):
-                        line = "AcceptExternalConnections=1\n"
-                    elif stripped.startswith("ECPort="):
-                        line = f"ECPort={self.ec_port}\n"
-                    elif stripped.startswith("ECPassword="):
-                        line = f"ECPassword={pw_double_md5}\n"
-                    elif stripped.startswith("UseTrayIcon="):
-                        line = "UseTrayIcon=0\n"
-
-                # Also set the download dir
-                if stripped.startswith("IncomingDir="):
-                    line = f"IncomingDir={self.save_path}\n"
-                elif stripped.startswith("TempDir="):
-                    temp_dir = self.save_path + "_Temp"
-                    os.makedirs(temp_dir, exist_ok=True)
-                    line = f"TempDir={temp_dir}\n"
-
-                new_lines.append(line)
-
-            # If [ExternalConnect] section didn't exist, append it
-            if not found_ec_section:
-                new_lines.append("\n[ExternalConnect]\n")
-                new_lines.append("AcceptExternalConnections=1\n")
-                new_lines.append(f"ECPort={self.ec_port}\n")
-                new_lines.append(f"ECPassword={pw_double_md5}\n")
-                new_lines.append("UseTrayIcon=0\n")
-
-            with open(prefs_path, "w") as f:
-                f.writelines(new_lines)
-        except Exception as e:
-            print(f"[ed2k] Failed to patch amule.conf: {e}")
-
-    def _start_daemon(self):
-        """Start amuled daemon, wait for EC port to become available."""
-        amuled = shutil.which("amuled") or "amuled"
-        # -f means foreground-less (daemon mode)
-        args = [amuled, "-f"]
-        try:
-            self.proc = subprocess.Popen(
-                args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            print("[ed2k] aMule not installed — ed2k downloads will be unavailable")
-            self.proc = None
-            return
-
-        # Wait for EC port to come up (amuled needs time to init)
-        for _ in range(80):  # up to 20 seconds
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1)
-                s.connect(("127.0.0.1", self.ec_port))
-                s.close()
-                return
-            except Exception:
-                time.sleep(0.25)
-        print("[ed2k] aMule daemon EC port did not come up in 20s")
-
-    def _patch_ec_config(self):
-        """Ensure amule.conf has EC enabled with our password."""
-        prefs_path = os.path.join(self.home, "amule.conf")
-        if not os.path.exists(prefs_path):
-            return
-        try:
-            with open(prefs_path, "r") as f:
-                lines = f.readlines()
-            # Hash the EC password the way aMule expects (MD5 of MD5)
-            pw_md5 = hashlib.md5(self.ec_passwd.encode("utf-8")).hexdigest()
-            pw_double_md5 = hashlib.md5(pw_md5.encode("utf-8")).hexdigest()
-
-            new_lines = []
-            ec_section_found = False
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("[ExternalConnect]"):
-                    ec_section_found = True
-                if ec_section_found:
-                    if stripped.startswith("ECPort="):
-                        line = f"ECPort={self.ec_port}\n"
-                    elif stripped.startswith("ECPassword="):
-                        line = f"ECPassword={pw_double_md5}\n"
-                    elif stripped.startswith("AcceptExternalConnections="):
-                        line = "AcceptExternalConnections=1\n"
-                    elif stripped.startswith("UseTrayIcon="):
-                        # Don't use tray icon in daemon mode
-                        line = "UseTrayIcon=0\n"
-                    elif stripped.startswith("["):
-                        # New section — stop patching EC section
-                        ec_section_found = False
-                new_lines.append(line)
-            with open(prefs_path, "w") as f:
-                f.writelines(new_lines)
-        except Exception as e:
-            print(f"[ed2k] Failed to patch amule.conf: {e}")
-
-    def _run_cmd(self, cmd_str):
-        """Run an amulecmd command and return output text."""
-        amulecmd = shutil.which("amulecmd") or "amulecmd"
-        args = [
-            amulecmd,
-            f"--host=localhost",
-            f"--port={self.ec_port}",
-            f"--password={self.ec_passwd}",
-            f"--command={cmd_str}",
-            "--language=en",
-        ]
-        try:
-            r = subprocess.run(args, capture_output=True, text=True, timeout=15)
-            return r.stdout
-        except Exception as e:
-            return ""
-
-    def add_link(self, ed2k_url):
-        """Add an ed2k link to aMule download queue."""
-        output = self._run_cmd(f"add {ed2k_url}")
-        # aMule doesn't return a GID; we parse output for confirmation
-        # Typical output: "Added link: ed2k://..."
-        return output
-
-    def get_download_list(self):
-        """Get current download queue from aMule."""
-        output = self._run_cmd("show dl")
-        return self._parse_download_list(output)
-
-    def get_shared_list(self):
-        """Get completed/shared files from aMule."""
-        output = self._run_cmd("show ul")
-        return self._parse_shared_list(output)
-
-    def pause_download(self, file_hash):
-        """Pause a download by its file hash."""
-        self._run_cmd(f"pause {file_hash}")
-
-    def resume_download(self, file_hash):
-        """Resume a paused download by its file hash."""
-        self._run_cmd(f"resume {file_hash}")
-
-    def cancel_download(self, file_hash):
-        """Cancel and remove a download by its file hash."""
-        self._run_cmd(f"cancel {file_hash}")
-
-    @staticmethod
-    def _parse_download_list(output):
-        """Parse amulecmd 'show dl' output into structured data."""
-        downloads = []
-        if not output:
-            return downloads
-        # amulecmd show dl format (English):
-        #  > Download queue:
-        #  > 1) [Hash] FileName | Size | Progress | Sources | Speed | Status
-        # Pattern varies by version; we use regex to extract key fields
-        for line in output.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("> Download") or line.startswith("aMulecmd"):
+            r = requests.get(search_url, headers=headers, timeout=12, allow_redirects=True)
+            if r.status_code != 200:
                 continue
-            # Try to match: number) [hash] name | size | progress% | ... | speed | status
-            m = re.match(
-                r'\d+\)\s+\[([A-Fa-f0-9]{32})\]\s+(.+?)\s*\|\s*(\d+[\.\,]?\d*\s*[KMGT]?B)\s*\|\s*(\d+)%\s*\|\s*\d+\s*\|\s*(\d+[\.\,]?\d*\s*[KMGT]?B/s)?\s*\|\s*(.+)',
-                line
-            )
-            if m:
-                downloads.append({
-                    "hash": m.group(1).upper(),
-                    "name": m.group(2).strip(),
-                    "size_str": m.group(3).strip(),
-                    "progress": int(m.group(4)),
-                    "speed_str": m.group(5) or "",
-                    "status": m.group(6).strip(),
-                })
-        return downloads
+            html = r.text
 
-    @staticmethod
-    def _parse_shared_list(output):
-        """Parse amulecmd 'show ul' output for completed files."""
-        completed = []
-        if not output:
-            return completed
-        for line in output.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("> Upload") or line.startswith("aMulecmd"):
+            # Extract magnet links (both hex and base32 info hashes)
+            magnet_matches = re.findall(
+                r'(magnet:\?xt=urn:btih:[a-zA-Z2-7]{32,40}[^"<\s]*)', html
+            )
+            if not magnet_matches:
                 continue
-            # Format: number) [hash] name | Size | ...
-            m = re.match(
-                r'\d+\)\s+\[([A-Fa-f0-9]{32})\]\s+(.+?)\s*\|\s*(\d+[\.\,]?\d*\s*[KMGT]?B)',
-                line
-            )
-            if m:
-                completed.append({
-                    "hash": m.group(1).upper(),
-                    "name": m.group(2).strip(),
-                    "size_str": m.group(3).strip(),
-                })
-        return completed
 
-    @staticmethod
-    def parse_ed2k_url(url):
-        """Parse an ed2k:// link to extract file name, size, and hash."""
-        # ed2k://|file|FileName|FileSize|FileHash|/
-        m = re.match(
-            r'ed2k://\|file\|([^|]+)\|(\d+)\|([A-Fa-f0-9]{32})\|/',
-            url.strip()
-        )
-        if m:
-            return {
-                "name": m.group(1),
-                "size": int(m.group(2)),
-                "hash": m.group(3).upper(),
-            }
-        return None
+            search_lower = search_query.lower()
+
+            # Try name matching from dn= parameter in magnet URIs
+            for magnet in magnet_matches:
+                dn_match = re.search(r'dn=([^&]+)', magnet)
+                if dn_match:
+                    magnet_name = urllib.parse.unquote(dn_match.group(1))
+                    clean_magnet = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
+                    clean_search = search_lower
+                    if clean_search in clean_magnet or clean_magnet.startswith(clean_search[:20]):
+                        return {
+                            "ok": True,
+                            "title": magnet_name,
+                            "magnet": magnet,
+                            "size": file_size,
+                            "source": "torrent_search",
+                        }
+
+            # Fallback: return first magnet if page title contains search query
+            page_title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
+            if page_title_match and search_query[:20].lower() in page_title_match.group(1).lower():
+                first_magnet = magnet_matches[0]
+                dn_match = re.search(r'dn=([^&]+)', first_magnet)
+                title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
+                return {
+                    "ok": True,
+                    "title": title,
+                    "magnet": first_magnet,
+                    "size": file_size,
+                    "source": "torrent_search",
+                }
+
+        except Exception:
+            continue
+
+    return {"ok": False, "error": "在种子网络中未找到该文件的源。可能原因：\n1. 该文件仅在电驴(eDonkey)网络可用，种子网络无源\n2. 种子搜索网站暂时不可访问\n\n建议：复制文件名到浏览器搜索其他下载方式。"}
 
 
 # --------------------------------------------------------------------------- #
-#  Engine: aria2 subprocess + amuled + task store + record persistence
+#  Engine: aria2 subprocess + task store + record persistence
 # --------------------------------------------------------------------------- #
 class Engine:
     def __init__(self):
@@ -703,20 +515,12 @@ class Engine:
         self.uploads = 4        # upload slots per task (BT)
         self.aria = Aria2()
         self.proc = None
-        self.amule = None
         self._start_aria2()
-        # Try to start aMule for ed2k support; if not installed, ed2k will show error at add-time
-        try:
-            self.amule = AMuleDaemon(self.save_path)
-        except Exception:
-            self.amule = None
         # in-memory extra metadata for tasks not kept by aria2
         self.tasks = {}   # gid -> {type, url, submitted, picked_files}
         self.records = self._load_records()
         self.m3u8_tasks = {}
         self._m3u8_counter = 0
-        self.ed2k_tasks = {}   # hash -> {gid, name, url, size, state, progress, ...}
-        self._ed2k_counter = 0
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
@@ -826,9 +630,9 @@ class Engine:
         t = classify(url)
         if t in UNSUPPORTED:
             return {"ok": False, "error": UNSUPPORTED_MSG[t], "type": t}
-        # ed2k links go through aMule
+        # ed2k links: search for matching magnet/torrent
         if t == "ed2k":
-            return self._add_ed2k(url)
+            return self._convert_ed2k(url)
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
@@ -1271,123 +1075,6 @@ class Engine:
                 "metadata_progress": 0,
                 "added_at": info.get('added_at', 0),
             })
-        # 合并 ed2k 电驴下载任务（通过 amulecmd 轮询状态）
-        if self.amule:
-            try:
-                dl_list = self.amule.get_download_list()
-                for dl in dl_list:
-                    fhash = dl.get("hash", "")
-                    # Find matching ed2k task by hash
-                    matched_gid = None
-                    for gid, tinfo in self.ed2k_tasks.items():
-                        if tinfo.get("hash") == fhash:
-                            matched_gid = gid
-                            break
-                    if matched_gid:
-                        tinfo = self.ed2k_tasks[matched_gid]
-                        # Update progress & state from amulecmd
-                        tinfo["progress"] = dl.get("progress", tinfo.get("progress", 0))
-                        speed_str = dl.get("speed_str", "")
-                        tinfo["download_rate"] = self._parse_speed(speed_str)
-                        status = dl.get("status", "").lower()
-                        if "paused" in status or "pause" in status:
-                            tinfo["state"] = "paused"
-                        elif "downloading" in status or "active" in status:
-                            tinfo["state"] = "downloading"
-                        elif "error" in status or "err" in status:
-                            tinfo["state"] = "error"
-                        elif "complete" in status or dl.get("progress", 0) >= 100:
-                            tinfo["state"] = "finished"
-                        elif "waiting" in status or "queue" in status:
-                            tinfo["state"] = "queued"
-                        else:
-                            tinfo["state"] = "downloading"
-                        # Auto-archive finished ed2k tasks
-                        if tinfo["state"] == "finished":
-                            if matched_gid not in existing:
-                                existing.add(matched_gid)
-                                output_path = os.path.join(self.save_path, tinfo.get("name", ""))
-                                self.records["history"].insert(0, {
-                                    "gid": matched_gid, "type": "ed2k",
-                                    "name": tinfo.get("name", ""),
-                                    "url": tinfo.get("url", ""),
-                                    "dir": self.save_path,
-                                    "paths": [output_path] if os.path.exists(output_path) else [],
-                                    "size": tinfo.get("size", 0),
-                                    "completed_at": int(time.time()),
-                                })
-                                del self.ed2k_tasks[matched_gid]
-                                continue
-                # Report active ed2k tasks (skip unconfirmed ones — they're in preview card)
-                for gid, tinfo in list(self.ed2k_tasks.items()):
-                    # Unconfirmed tasks are waiting in the preview card, not shown in task list
-                    if not tinfo.get("confirmed"):
-                        continue
-                    # Check if the file exists on disk (aMule completed it)
-                    file_path = os.path.join(self.save_path, tinfo.get("name", ""))
-                    if os.path.exists(file_path) and tinfo.get("state") != "paused":
-                        tinfo["state"] = "finished"
-                        tinfo["progress"] = 100
-                        tinfo["size"] = os.path.getsize(file_path)
-                        if gid not in existing:
-                            existing.add(gid)
-                            self.records["history"].insert(0, {
-                                "gid": gid, "type": "ed2k",
-                                "name": tinfo.get("name", ""),
-                                "url": tinfo.get("url", ""),
-                                "dir": self.save_path,
-                                "paths": [file_path],
-                                "size": tinfo.get("size", 0),
-                                "completed_at": int(time.time()),
-                            })
-                            del self.ed2k_tasks[gid]
-                            self._save_records()
-                            continue
-                    items.append({
-                        "gid": gid,
-                        "type": "ed2k",
-                        "name": tinfo.get("name", ""),
-                        "state": tinfo.get("state", "downloading"),
-                        "progress": tinfo.get("progress", 0),
-                        "size": tinfo.get("size", 0),
-                        "completed_size": int(tinfo.get("size", 0) * tinfo.get("progress", 0) / 100),
-                        "download_rate": tinfo.get("download_rate", 0),
-                        "upload_rate": 0,
-                        "peers": 0,
-                        "seeds": 0,
-                        "dir": self.save_path,
-                        "files": [],
-                        "paths": [],
-                        "url": tinfo.get("url", ""),
-                        "has_metadata": True,
-                        "metadata_progress": 0,
-                        "added_at": tinfo.get("added_at", 0),
-                    })
-            except Exception:
-                # amulecmd failed — just show confirmed tasks from in-memory state
-                for gid, tinfo in self.ed2k_tasks.items():
-                    if not tinfo.get("confirmed"):
-                        continue
-                    items.append({
-                        "gid": gid,
-                        "type": "ed2k",
-                        "name": tinfo.get("name", ""),
-                        "state": tinfo.get("state", "downloading"),
-                        "progress": tinfo.get("progress", 0),
-                        "size": tinfo.get("size", 0),
-                        "completed_size": int(tinfo.get("size", 0) * tinfo.get("progress", 0) / 100),
-                        "download_rate": tinfo.get("download_rate", 0),
-                        "upload_rate": 0,
-                        "peers": 0,
-                        "seeds": 0,
-                        "dir": self.save_path,
-                        "files": [],
-                        "paths": [],
-                        "url": tinfo.get("url", ""),
-                        "has_metadata": True,
-                        "metadata_progress": 0,
-                        "added_at": tinfo.get("added_at", 0),
-                    })
         return {
             "settings": {
                 "max_active": self.max_active,
@@ -1755,109 +1442,32 @@ class Engine:
             return True
         return False
 
-    # ---- ed2k/eDonkey download (aMule) ----
-    def _add_ed2k(self, url):
-        """Parse an ed2k link and return preview info.
-        Does NOT start download — user confirms via preview card first."""
-        parsed = AMuleDaemon.parse_ed2k_url(url)
+    # ---- ed2k → magnet conversion ----
+    def _convert_ed2k(self, url):
+        """Convert an ed2k link to a magnet/torrent download by searching
+        public torrent indexes for the same file."""
+        parsed = parse_ed2k_url(url)
         if not parsed:
             return {"ok": False, "error": "无法解析 ed2k 链接格式", "type": "ed2k"}
-        gid = f"ed2k_{self._ed2k_counter}"
-        self._ed2k_counter += 1
-        # Record parsed info only; actual download starts after user confirms
-        self.ed2k_tasks[gid] = {
-            "gid": gid,
-            "hash": parsed["hash"],
-            "name": parsed["name"],
-            "url": url,
-            "size": parsed["size"],
-            "state": "queued",
-            "progress": 0,
-            "download_rate": 0,
-            "added_at": time.time(),
-            "confirmed": False,
-        }
-        # Return preview data for frontend card
-        return {
-            "ok": True, "gid": gid, "type": "ed2k",
-            "title": parsed["name"],
-            "size": parsed["size"],
-            "hash": parsed["hash"],
-            "preview": True,
-        }
-
-    def _confirm_ed2k(self, gid, action):
-        """User confirmed the ed2k download — now submit to aMule."""
-        if gid not in self.ed2k_tasks:
-            return {"ok": False, "error": "任务不存在"}
-        info = self.ed2k_tasks[gid]
-        if info.get("confirmed"):
-            return {"ok": True}
-        if not self.amule:
-            return {"ok": False, "error": "aMule 未安装。请先安装 aMule：brew install amule"}
-        self.amule.add_link(info["url"])
-        info["confirmed"] = True
-        info["state"] = "downloading"
-        return {"ok": True, "gid": gid, "type": "ed2k"}
-
-    def pause_ed2k_download(self, gid):
-        """Pause an ed2k download via aMule."""
-        if gid in self.ed2k_tasks:
-            info = self.ed2k_tasks[gid]
-            fhash = info.get("hash", "")
-            if self.amule and fhash:
-                self.amule.pause_download(fhash)
-            info["state"] = "paused"
-            return True
-        return False
-
-    def resume_ed2k_download(self, gid):
-        """Resume a paused ed2k download via aMule."""
-        if gid in self.ed2k_tasks:
-            info = self.ed2k_tasks[gid]
-            if info.get("state") != "paused":
-                return False
-            fhash = info.get("hash", "")
-            if self.amule and fhash:
-                self.amule.resume_download(fhash)
-            info["state"] = "downloading"
-            return True
-        return False
-
-    def stop_ed2k_download(self, gid, skip_trash=False):
-        """Stop an ed2k download, optionally move to trash."""
-        if gid in self.ed2k_tasks:
-            info = self.ed2k_tasks[gid]
-            fhash = info.get("hash", "")
-            if self.amule and fhash:
-                self.amule.cancel_download(fhash)
-            if not skip_trash:
-                self.records["trash"].insert(0, {
-                    "gid": gid, "type": "ed2k",
-                    "name": info.get("name", ""),
-                    "url": info.get("url", ""),
-                    "dir": self.save_path,
-                    "paths": [],
-                    "size": info.get("size", 0),
-                    "completed_at": int(time.time()),
-                })
-                self._save_records()
-            del self.ed2k_tasks[gid]
-            return True
-        return False
-
-    @staticmethod
-    def _parse_speed(speed_str):
-        """Parse speed string like '1.2MB/s' or '500KB/s' to bytes/sec int."""
-        if not speed_str:
-            return 0
-        m = re.match(r'([\d.]+)\s*(B|KB|MB|GB|TB)/s', speed_str, re.IGNORECASE)
-        if not m:
-            return 0
-        val = float(m.group(1))
-        unit = m.group(2).upper()
-        multipliers = {"B": 1, "KB": 1024, "MB": 1048576, "GB": 1073741824, "TB": 1099511627776}
-        return int(val * multipliers.get(unit, 1))
+        # Search for a matching torrent/magnet link
+        result = search_magnet_for_ed2k(parsed["name"], parsed["size"])
+        if result.get("ok"):
+            # Found a magnet link — return it as torrent type for the preview card
+            return {
+                "ok": True,
+                "title": result["title"],
+                "poster": "",
+                "magnet": result["magnet"],
+                "m3u8_url": "",
+                "type": "torrent",
+                "ed2k_source": True,  # flag: this magnet came from ed2k conversion
+                "ed2k_name": parsed["name"],
+                "ed2k_hash": parsed["hash"],
+                "ed2k_size": parsed["size"],
+            }
+        else:
+            # No torrent found — return the error message
+            return {"ok": False, "error": result["error"], "type": "ed2k"}
 
 
 engine = Engine()
@@ -1930,8 +1540,6 @@ def api_pause():
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.pause_m3u8_download(gid))
-    if gid and gid.startswith("ed2k_"):
-        return jsonify(ok=engine.pause_ed2k_download(gid))
     return jsonify(ok=engine.pause(data.get("gid")))
 
 
@@ -1941,20 +1549,16 @@ def api_resume():
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.resume_m3u8_download(gid))
-    if gid and gid.startswith("ed2k_"):
-        return jsonify(ok=engine.resume_ed2k_download(gid))
     return jsonify(ok=engine.resume(data.get("gid")))
 
 
 @app.route("/api/retry", methods=["POST"])
 def api_retry():
-    """重试失败的任务。m3u8 任务使用续传，ed2k 使用 resume，aria2 任务调用 resume。"""
+    """重试失败的任务。m3u8 任务使用续传，aria2 任务调用 resume。"""
     data = request.get_json(force=True)
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.resume_m3u8_download(gid))
-    if gid and gid.startswith("ed2k_"):
-        return jsonify(ok=engine.resume_ed2k_download(gid))
     else:
         return jsonify(ok=engine.resume(gid))
 
@@ -1966,8 +1570,6 @@ def api_stop():
     skip_trash = data.get("skip_trash", False)
     if gid and gid.startswith("m3u8_"):
         engine.stop_m3u8_download(gid, skip_trash=skip_trash)
-    elif gid and gid.startswith("ed2k_"):
-        engine.stop_ed2k_download(gid, skip_trash=skip_trash)
     else:
         engine.stop(gid, skip_trash=skip_trash)
     return jsonify(ok=True)
@@ -2051,9 +1653,6 @@ def api_confirm_ed2k():
     action = data.get("action", "download")
     if not gid:
         return jsonify(ok=False, error="缺少 gid"), 400
-    return jsonify(engine._confirm_ed2k(gid, action))
-
-
 @app.route("/api/choose_dir", methods=["POST"])
 def api_choose_dir():
     """打开系统原生文件夹选择对话框，返回选中的路径。"""
