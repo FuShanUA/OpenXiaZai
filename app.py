@@ -1452,7 +1452,7 @@ class Engine:
         # Search for a matching torrent/magnet link
         result = search_magnet_for_ed2k(parsed["name"], parsed["size"])
         if result.get("ok"):
-            # Found a magnet link — return it as torrent type for the preview card
+            # Found a magnet link — return it for the preview card
             return {
                 "ok": True,
                 "title": result["title"],
@@ -1460,14 +1460,34 @@ class Engine:
                 "magnet": result["magnet"],
                 "m3u8_url": "",
                 "type": "torrent",
-                "ed2k_source": True,  # flag: this magnet came from ed2k conversion
+                "ed2k_source": True,
                 "ed2k_name": parsed["name"],
                 "ed2k_hash": parsed["hash"],
                 "ed2k_size": parsed["size"],
             }
         else:
-            # No torrent found — return the error message
-            return {"ok": False, "error": result["error"], "type": "ed2k"}
+            # No torrent found — include file info in error so user knows what they wanted
+            size_str = self._fmt_size(parsed["size"])
+            error_msg = (
+                f"文件：{parsed['name']}\n"
+                f"大小：{size_str}\n"
+                f"ed2k Hash：{parsed['hash']}\n\n"
+                + result["error"]
+            )
+            return {"ok": False, "error": error_msg, "type": "ed2k"}
+
+    @staticmethod
+    def _fmt_size(size):
+        """Format bytes to human-readable size string."""
+        if not size:
+            return "0 B"
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = 0
+        v = size
+        while v >= 1024 and i < len(units) - 1:
+            v /= 1024
+            i += 1
+        return f"{v:.1f} {units[i]}"
 
 
 engine = Engine()
