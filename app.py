@@ -429,10 +429,9 @@ def parse_ed2k_url(url):
 def search_magnet_for_ed2k(file_name, file_size):
     """Search for a magnet/torrent link for the same file as an ed2k link.
 
-    This is a best-effort search — ed2k and BitTorrent use different hash
-    algorithms (MD4 vs SHA1), so direct conversion is impossible. We search
-    by file name on public torrent indexes, but many sites are geo-blocked
-    or Cloudflare-protected, so this may fail.
+    Strategy: use DuckDuckGo HTML search to find torrent pages containing
+    magnet links for the file, then extract magnet links from those pages.
+    DDG works without Cloudflare JS challenge, unlike most torrent indexes.
     """
     import urllib.parse
 
@@ -446,58 +445,142 @@ def search_magnet_for_ed2k(file_name, file_size):
     if len(search_query) > 60:
         search_query = search_query[:60]
 
-    # Torrent index sites — try each, accept any that works
-    search_sources = [
-        f"https://1337x.to/search/{urllib.parse.quote_plus(search_query)}/1/",
-        f"https://torrentgalaxy.to/torrents.php?search={urllib.parse.quote_plus(search_query)}&sort=seeders&order=desc",
-    ]
-
-    for search_url in search_sources:
-        try:
-            r = requests.get(search_url, headers=headers, timeout=12, allow_redirects=True)
-            if r.status_code != 200:
-                continue
+    # Step 1: Search DuckDuckGo for torrent/magnet pages
+    ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_query)}+magnet+torrent"
+    try:
+        r = requests.get(ddg_url, headers=headers, timeout=12, allow_redirects=True)
+        if r.status_code == 200:
             html = r.text
-
-            # Extract magnet links (both hex and base32 info hashes)
-            magnet_matches = re.findall(
-                r'(magnet:\?xt=urn:btih:[a-zA-Z2-7]{32,40}[^"<\s]*)', html
+            # Extract result URLs from DDG
+            # DDG format: <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=ENCODED_URL">
+            result_urls = re.findall(
+                r'uddg=(https?://[^&"\']+)', html
             )
-            if not magnet_matches:
-                continue
+            # Decode URLs
+            result_urls = [urllib.parse.unquote(u) for u in result_urls]
 
-            search_lower = search_query.lower()
+            # Skip non-torrent pages (news, blogs, etc.)
+            torrent_domains = ('1337x', 'thepiratebay', 'torrentgalaxy', 'rarbg',
+                              'yts', 'nyaa', 'torlock', 'magnetdl', 'limetorrents',
+                              'torrentdownload', 'yourbittorrent', 'bt4g', 'ibit',
+                              'torrentfunk', 'snowfl', 'piratebay', 'torrentz2')
 
-            # Try name matching from dn= parameter in magnet URIs
-            for magnet in magnet_matches:
-                dn_match = re.search(r'dn=([^&]+)', magnet)
-                if dn_match:
-                    magnet_name = urllib.parse.unquote(dn_match.group(1))
-                    clean_magnet = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
-                    clean_search = search_lower
-                    if clean_search in clean_magnet or clean_magnet.startswith(clean_search[:20]):
+            # Visit each result page and look for magnet links
+            # Limit to top 5 results to avoid excessive requests
+            for result_url in result_urls[:5]:
+                # Skip obviously irrelevant pages
+                url_lower = result_url.lower()
+                if not any(d in url_lower for d in torrent_domains):
+                    # Also try non-domain pages — many generic pages embed magnet links too
+                    # But skip known non-torrent sites
+                    skip = ('wikipedia', 'github', 'stackoverflow', 'reddit',
+                            'amazon', 'ebay', 'youtube', 'facebook', 'twitter')
+                    if any(s in url_lower for s in skip):
+                        continue
+
+                try:
+                    page_r = requests.get(result_url, headers=headers, timeout=10, allow_redirects=True)
+                    if page_r.status_code != 200:
+                        continue
+                    page_html = page_r.text
+
+                    # Extract magnet links
+                    magnet_matches = re.findall(
+                        r'(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"<\s]*)',
+                        page_html
+                    )
+                    # Also try base32 info hashes
+                    if not magnet_matches:
+                        magnet_matches = re.findall(
+                            r'(magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"<\s]*)',
+                            page_html
+                        )
+
+                    if not magnet_matches:
+                        continue
+
+                    # Match by name
+                    search_lower = search_query.lower()
+                    for magnet in magnet_matches:
+                        dn_match = re.search(r'dn=([^&]+)', magnet)
+                        magnet_name = ""
+                        if dn_match:
+                            magnet_name = urllib.parse.unquote(dn_match.group(1))
+
+                        if magnet_name:
+                            clean_magnet = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
+                            clean_search = search_lower
+                            # Partial match: ed2k name should appear in torrent name
+                            # or vice versa (torrents often have extra tags)
+                            if (clean_search[:20] in clean_magnet or
+                                clean_magnet[:20] in clean_search or
+                                clean_search.split()[0] in clean_magnet.split()):
+                                return {
+                                    "ok": True,
+                                    "title": magnet_name,
+                                    "magnet": magnet,
+                                    "size": file_size,
+                                    "source": "torrent_search",
+                                }
+
+                    # Name match failed but magnets exist — return first one
+                    # if the page title contains our search query
+                    page_title = ""
+                    title_match = re.search(r'<title[^>]*>(.*?)</title>', page_html, re.IGNORECASE)
+                    if title_match:
+                        page_title = title_match.group(1).lower()
+                    if search_query[:15].lower() in page_title and magnet_matches:
+                        first_magnet = magnet_matches[0]
+                        dn_match = re.search(r'dn=([^&]+)', first_magnet)
+                        title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
                         return {
                             "ok": True,
-                            "title": magnet_name,
-                            "magnet": magnet,
+                            "title": title,
+                            "magnet": first_magnet,
                             "size": file_size,
                             "source": "torrent_search",
                         }
 
-            # Fallback: return first magnet if page title contains search query
-            page_title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
-            if page_title_match and search_query[:20].lower() in page_title_match.group(1).lower():
-                first_magnet = magnet_matches[0]
-                dn_match = re.search(r'dn=([^&]+)', first_magnet)
-                title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
-                return {
-                    "ok": True,
-                    "title": title,
-                    "magnet": first_magnet,
-                    "size": file_size,
-                    "source": "torrent_search",
-                }
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
+    # Step 2: Try direct torrent index sites as fallback (may be blocked by Cloudflare)
+    direct_sources = [
+        f"https://1337x.to/search/{urllib.parse.quote_plus(search_query)}/1/",
+        f"https://torrentgalaxy.to/torrents.php?search={urllib.parse.quote_plus(search_query)}&sort=seeders&order=desc",
+    ]
+    for search_url in direct_sources:
+        try:
+            r = requests.get(search_url, headers=headers, timeout=12, allow_redirects=True)
+            if r.status_code == 200:
+                html = r.text
+                magnet_matches = re.findall(
+                    r'(magnet:\?xt=urn:btih:[a-zA-Z2-7]{32,40}[^"<\s]*)', html
+                )
+                if magnet_matches:
+                    search_lower = search_query.lower()
+                    for magnet in magnet_matches:
+                        dn_match = re.search(r'dn=([^&]+)', magnet)
+                        if dn_match:
+                            magnet_name = urllib.parse.unquote(dn_match.group(1))
+                            clean_magnet = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
+                            if search_lower[:20] in clean_magnet:
+                                return {
+                                    "ok": True, "title": magnet_name,
+                                    "magnet": magnet, "size": file_size,
+                                    "source": "torrent_search",
+                                }
+                    if magnet_matches:
+                        first_magnet = magnet_matches[0]
+                        dn_match = re.search(r'dn=([^&]+)', first_magnet)
+                        title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
+                        return {
+                            "ok": True, "title": title,
+                            "magnet": first_magnet, "size": file_size,
+                            "source": "torrent_search",
+                        }
         except Exception:
             continue
 
