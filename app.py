@@ -425,23 +425,91 @@ class AMuleDaemon:
         self._start_daemon()
 
     def _ensure_config(self):
-        """Write aMule preferences to ensure EC is enabled and paths are set."""
+        """Write aMule preferences to ensure EC is enabled and paths are set.
+        Must be done BEFORE starting the daemon, because amuled reads config at startup."""
         os.makedirs(self.home, exist_ok=True)
-        # Only write preferences if they don't exist or EC is not configured
         prefs_path = os.path.join(self.home, "amule.conf")
-        need_write = True
-        if os.path.exists(prefs_path):
+        pw_md5 = hashlib.md5(self.ec_passwd.encode("utf-8")).hexdigest()
+        pw_double_md5 = hashlib.md5(pw_md5.encode("utf-8")).hexdigest()
+
+        if not os.path.exists(prefs_path):
+            # First time — let amuled generate default config, then we'll patch it
+            # We need to start amuled briefly just to generate the config file,
+            # then kill it, patch, and restart.
+            amuled = shutil.which("amuled") or "amuled"
             try:
-                with open(prefs_path, "r") as f:
-                    content = f.read()
-                if "ECPort=" in content:
-                    need_write = False
-            except Exception:
-                need_write = True
-        if need_write:
-            # aMule will auto-generate amule.conf on first run with default values.
-            # We'll patch it after daemon starts if needed.
-            pass
+                proc = subprocess.Popen([amuled, "-f"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Wait for config file to appear
+                for _ in range(40):
+                    if os.path.exists(prefs_path):
+                        break
+                    time.sleep(0.25)
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            except FileNotFoundError:
+                return
+
+        # Now patch the config (whether newly generated or already existing)
+        self._patch_ec_config(pw_double_md5)
+
+    def _patch_ec_config(self, pw_double_md5):
+        """Patch amule.conf: enable EC, set password, set save dir."""
+        prefs_path = os.path.join(self.home, "amule.conf")
+        if not os.path.exists(prefs_path):
+            return
+        try:
+            with open(prefs_path, "r") as f:
+                lines = f.readlines()
+
+            new_lines = []
+            in_ec_section = False
+            found_ec_section = False
+
+            for line in lines:
+                stripped = line.strip()
+                if stripped == "[ExternalConnect]":
+                    in_ec_section = True
+                    found_ec_section = True
+                elif stripped.startswith("[") and stripped.endswith("]") and stripped != "[ExternalConnect]":
+                    if in_ec_section:
+                        in_ec_section = False
+
+                if in_ec_section:
+                    if stripped.startswith("AcceptExternalConnections="):
+                        line = "AcceptExternalConnections=1\n"
+                    elif stripped.startswith("ECPort="):
+                        line = f"ECPort={self.ec_port}\n"
+                    elif stripped.startswith("ECPassword="):
+                        line = f"ECPassword={pw_double_md5}\n"
+                    elif stripped.startswith("UseTrayIcon="):
+                        line = "UseTrayIcon=0\n"
+
+                # Also set the download dir
+                if stripped.startswith("IncomingDir="):
+                    line = f"IncomingDir={self.save_path}\n"
+                elif stripped.startswith("TempDir="):
+                    temp_dir = self.save_path + "_Temp"
+                    os.makedirs(temp_dir, exist_ok=True)
+                    line = f"TempDir={temp_dir}\n"
+
+                new_lines.append(line)
+
+            # If [ExternalConnect] section didn't exist, append it
+            if not found_ec_section:
+                new_lines.append("\n[ExternalConnect]\n")
+                new_lines.append("AcceptExternalConnections=1\n")
+                new_lines.append(f"ECPort={self.ec_port}\n")
+                new_lines.append(f"ECPassword={pw_double_md5}\n")
+                new_lines.append("UseTrayIcon=0\n")
+
+            with open(prefs_path, "w") as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            print(f"[ed2k] Failed to patch amule.conf: {e}")
 
     def _start_daemon(self):
         """Start amuled daemon, wait for EC port to become available."""
@@ -466,8 +534,6 @@ class AMuleDaemon:
                 s.settimeout(1)
                 s.connect(("127.0.0.1", self.ec_port))
                 s.close()
-                # EC port is up — now ensure EC password is configured
-                self._patch_ec_config()
                 return
             except Exception:
                 time.sleep(0.25)
@@ -1252,8 +1318,11 @@ class Engine:
                                 })
                                 del self.ed2k_tasks[matched_gid]
                                 continue
-                # Report active ed2k tasks
+                # Report active ed2k tasks (skip unconfirmed ones — they're in preview card)
                 for gid, tinfo in list(self.ed2k_tasks.items()):
+                    # Unconfirmed tasks are waiting in the preview card, not shown in task list
+                    if not tinfo.get("confirmed"):
+                        continue
                     # Check if the file exists on disk (aMule completed it)
                     file_path = os.path.join(self.save_path, tinfo.get("name", ""))
                     if os.path.exists(file_path) and tinfo.get("state") != "paused":
@@ -1295,8 +1364,10 @@ class Engine:
                         "added_at": tinfo.get("added_at", 0),
                     })
             except Exception:
-                # amulecmd failed — just show tasks from in-memory state
+                # amulecmd failed — just show confirmed tasks from in-memory state
                 for gid, tinfo in self.ed2k_tasks.items():
+                    if not tinfo.get("confirmed"):
+                        continue
                     items.append({
                         "gid": gid,
                         "type": "ed2k",
@@ -1686,30 +1757,47 @@ class Engine:
 
     # ---- ed2k/eDonkey download (aMule) ----
     def _add_ed2k(self, url):
-        """Add an ed2k link for download via aMule."""
-        if not self.amule:
-            return {"ok": False, "error": "aMule 未安装。请先安装 aMule：brew install amule", "type": "ed2k"}
+        """Parse an ed2k link and return preview info.
+        Does NOT start download — user confirms via preview card first."""
         parsed = AMuleDaemon.parse_ed2k_url(url)
         if not parsed:
             return {"ok": False, "error": "无法解析 ed2k 链接格式", "type": "ed2k"}
         gid = f"ed2k_{self._ed2k_counter}"
         self._ed2k_counter += 1
-        # Add link to aMule
-        output = self.amule.add_link(url)
-        if not output:
-            # amulecmd might have failed; try anyway — daemon might still pick it up
-            pass
+        # Record parsed info only; actual download starts after user confirms
         self.ed2k_tasks[gid] = {
             "gid": gid,
             "hash": parsed["hash"],
             "name": parsed["name"],
             "url": url,
             "size": parsed["size"],
-            "state": "downloading",
+            "state": "queued",
             "progress": 0,
             "download_rate": 0,
             "added_at": time.time(),
+            "confirmed": False,
         }
+        # Return preview data for frontend card
+        return {
+            "ok": True, "gid": gid, "type": "ed2k",
+            "title": parsed["name"],
+            "size": parsed["size"],
+            "hash": parsed["hash"],
+            "preview": True,
+        }
+
+    def _confirm_ed2k(self, gid, action):
+        """User confirmed the ed2k download — now submit to aMule."""
+        if gid not in self.ed2k_tasks:
+            return {"ok": False, "error": "任务不存在"}
+        info = self.ed2k_tasks[gid]
+        if info.get("confirmed"):
+            return {"ok": True}
+        if not self.amule:
+            return {"ok": False, "error": "aMule 未安装。请先安装 aMule：brew install amule"}
+        self.amule.add_link(info["url"])
+        info["confirmed"] = True
+        info["state"] = "downloading"
         return {"ok": True, "gid": gid, "type": "ed2k"}
 
     def pause_ed2k_download(self, gid):
@@ -1953,6 +2041,17 @@ def api_download_m3u8():
         return jsonify(ok=False, error="请输入 m3u8 地址"), 400
     gid = engine.start_m3u8_download(url, title or "视频下载", paused=paused)
     return jsonify(ok=True, gid=gid, type="m3u8")
+
+
+@app.route("/api/confirm_ed2k", methods=["POST"])
+def api_confirm_ed2k():
+    """Confirm an ed2k download after user reviews the preview card."""
+    data = request.get_json(force=True)
+    gid = data.get("gid", "")
+    action = data.get("action", "download")
+    if not gid:
+        return jsonify(ok=False, error="缺少 gid"), 400
+    return jsonify(engine._confirm_ed2k(gid, action))
 
 
 @app.route("/api/choose_dir", methods=["POST"])

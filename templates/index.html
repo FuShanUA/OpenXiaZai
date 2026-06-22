@@ -181,6 +181,23 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     </div>
   </div>
 
+  <!-- ed2k 预览确认卡片 -->
+  <div class="card" id="ed2kPreview" style="display:none">
+    <div class="row" style="align-items:flex-start">
+      <div style="width:60px;height:60px;border-radius:10px;background:rgba(255,176,32,.12);display:flex;align-items:center;justify-content:center;font-size:28px;flex-shrink:0">🫏</div>
+      <div style="flex:1;min-width:0;margin-left:12px">
+        <div id="ed2kTitle" style="font-weight:600;font-size:15px;margin-bottom:6px"></div>
+        <div id="ed2kInfo" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+        <div id="ed2kUrl" style="font-size:11px;color:var(--accent);word-break:break-all"></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px;gap:8px">
+      <button class="btn go" id="ed2kDownload">立即下载</button>
+      <button class="btn" id="ed2kQueue">加入队列</button>
+      <button class="btn" id="ed2kCancel">取消</button>
+    </div>
+  </div>
+
   <div class="tabs">
     <div class="tab active" data-tab="tasks">下载任务<span class="count" id="cTasks">0</span></div>
     <div class="tab" data-tab="history">下载记录<span class="count" id="cHist">0</span></div>
@@ -410,7 +427,25 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
-  // 非 HTTP 链接（magnet/ed2k/ftp 等）→ 原有流程
+  // ed2k 链接 → 先预览确认，再下载
+  if(v.startsWith('ed2k')){
+    $('addBtn').disabled=true;$('addBtn').textContent='解析中…';
+    try{
+      const res=await post('/api/add',{url});
+      if(!res||res.ok===false){await customAlert(res?.error||'添加失败');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
+      if(res.preview){
+        showEd2kPreview(res);
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      $('url').value='';$('typeHint').style.display='none';
+      switchTab('tasks');
+    }catch(e){await customAlert('添加失败: '+e.message)}
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
+  // 非 HTTP 链接（magnet/ftp 等）→ 原有流程
   $('addBtn').disabled=true;$('addBtn').textContent='添加中…';
   try{
     const res=await post('/api/add',{url});
@@ -511,6 +546,7 @@ document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
   const d=$('dropMenu');if(d.style.display==='block')d.style.display='none';
   if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
+  if($('ed2kPreview').style.display==='block'){hideEd2kPreview();return}
   if($('cxPreview').style.display==='block'){hideCxPreview();return}
   const gids=Object.keys(modalStates);
   if(gids.length>0){cancelModal(gids[gids.length-1],true)}
@@ -620,6 +656,42 @@ async function doCxAdd(action){
 $('cxDownload').onclick=async()=>{await doCxAdd('download')};
 $('cxQueue').onclick=async()=>{await doCxAdd('queue')};
 $('cxCancel').onclick=hideCxPreview;
+
+// ---- ed2k 预览确认卡片 ----
+let ed2kData=null;
+function showEd2kPreview(data){
+  ed2kData=data;
+  $('ed2kTitle').textContent=data.title||'电驴文件';
+  $('ed2kInfo').textContent='大小: '+fmtB(data.size||0)+' · Hash: '+data.hash;
+  $('ed2kUrl').textContent=data.url||'';
+  $('ed2kPreview').style.display='block';
+  $('url').value='';$('typeHint').style.display='none';
+}
+function hideEd2kPreview(){
+  if(ed2kData){
+    // Cancel — remove the queued task from engine
+    const gid=ed2kData.gid;
+    if(gid)post('/api/stop',{gid:gid,skip_trash:true});
+  }
+  ed2kData=null;
+  $('ed2kPreview').style.display='none';
+}
+async function doEd2kAdd(action){
+  if(!ed2kData)return;
+  const res=await post('/api/confirm_ed2k',{gid:ed2kData.gid,action});
+  if(res&&res.ok){
+    hideEd2kPreviewNoCancel();  // don't send stop request since we're confirming
+    switchTab('tasks');
+  }else{
+    await customAlert(res?.error||'下载失败');
+    return false;
+  }
+  return true;
+}
+function hideEd2kPreviewNoCancel(){ed2kData=null;$('ed2kPreview').style.display='none'}
+$('ed2kDownload').onclick=async()=>{await doEd2kAdd('download')};
+$('ed2kQueue').onclick=async()=>{await doEd2kAdd('queue')};
+$('ed2kCancel').onclick=hideEd2kPreview;
 
 // ---- file selection modal (multi, draggable, stackable) ----
 const modalStates={};  // gid -> {overlay, timer, startTime}
