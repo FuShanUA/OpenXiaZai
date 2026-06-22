@@ -1,10 +1,10 @@
 # OpenXiaZai
 
-开源的桌面下载器，支持磁力链接、种子、HTTP/HTTPS、FTP 等多种协议，基于 aria2 + Flask + pywebview 构建。
+开源的桌面下载器，支持磁力链接、种子、HTTP/HTTPS、FTP、ed2k (电驴) 等多种协议，基于 aria2 + aMule + Flask + pywebview 构建。
 
 ## 特性
 
-- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、M3U8 流媒体
+- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体
 - **种子文件选择**：添加磁力/种子后弹出文件选择窗口，可勾选需要下载的文件，支持按类型筛选（视频/音乐/图片/文档）
 - **多任务并行**：支持同时下载最多 3 个任务，每个任务 16 线程
 - **DHT 加速**：内置 DHT 启动节点、持久化路由表、扩展 Tracker 列表，加速磁力链接解析
@@ -19,6 +19,7 @@
 ```bash
 # macOS
 brew install aria2
+brew install amule   # 可选：ed2k 电驴下载支持
 
 # Python 依赖
 pip install flask pywebview requests
@@ -66,6 +67,7 @@ venv/bin/python app.py
 | 组件 | 用途 |
 |------|------|
 | [aria2](https://github.com/aria2/aria2) | 下载引擎，支持多协议、多线程、DHT |
+| [aMule](https://github.com/amule-project/amule) | ed2k/eDonkey 下载引擎（可选） |
 | [Flask](https://flask.palletsprojects.com/) | Web 后端，提供 REST API |
 | [pywebview](https://pywebview.flowrl.com/) | 原生桌面窗口，WKWebView 承载前端 |
 
