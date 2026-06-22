@@ -39,7 +39,7 @@ input[type=text]:focus{border-color:var(--accent)}
 .label{font-size:12px;color:var(--muted);min-width:90px}
 .badge{font-size:11px;padding:2px 8px;border-radius:5px;background:var(--panel2);
   border:1px solid var(--border);color:var(--accent)}
-.badge.torrent{color:#c9a3ff}.badge.http{color:#4f9dff}.badge.ftp{color:#34c759}.badge.ed2k{color:#ffb020}
+.badge.torrent{color:#c9a3ff}.badge.torrent_file{color:#c9a3ff}.badge.torrent_url{color:#c9a3ff}.badge.http{color:#4f9dff}.badge.ftp{color:#34c759}.badge.ed2k{color:#ffb020}
 .badge.unsup{color:var(--warn)}
 .badge.m3u8{color:#c9a3ff}
 .badge.direct{color:#c9a3ff}
@@ -256,7 +256,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴 eD2k",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链"};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴 eD2k",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链"};
 const UNSUP={quark:1,cloud:1,thunder:1};
 let activeTab='tasks';
 let cur=null;
@@ -307,6 +307,8 @@ $('url').addEventListener('input',()=>{
   if(!v){h.style.display='none';return}
   let t='http';
   if(v.startsWith('magnet:'))t='torrent';
+  else if(!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent'))t='torrent_file';
+  else if(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent'))t='torrent_url';
   else if(v.startsWith('ftp')||v.startsWith('sftp'))t='ftp';
   else if(v.startsWith('ed2k'))t='ed2k';
   else if(v.includes('quark.cn'))t='quark';
@@ -343,6 +345,44 @@ $('addBtn').onclick=async()=>{
   }
   if(v.startsWith('thunder')){
     await customAlert('迅雷链接请用迅雷客户端下载，或转换为磁力/直链后使用。',{title:'暂不支持迅雷'});
+    return;
+  }
+
+  // 本地种子文件路径（/path/to/file.torrent 或 ~/path/file.torrent）
+  if(!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent')){
+    $('addBtn').disabled=true;$('addBtn').textContent='添加种子…';
+    try{
+      const res=await post('/api/add',{url});
+      if(!res||res.ok===false){await customAlert(res?.error||'添加失败，请检查种子文件路径');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
+      $('url').value='';$('typeHint').style.display='none';
+      if(res.type==='torrent'){
+        showFileModal(res.gid);
+      } else {
+        switchTab('tasks');
+      }
+    }catch(e){
+      await customAlert('添加失败: '+e.message);
+    }
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
+  // 远程种子文件 URL（http(s)://.../*.torrent）
+  if(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent')){
+    $('addBtn').disabled=true;$('addBtn').textContent='下载种子…';
+    try{
+      const res=await post('/api/add',{url});
+      if(!res||res.ok===false){await customAlert(res?.error||'获取远程种子文件失败');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
+      $('url').value='';$('typeHint').style.display='none';
+      if(res.type==='torrent'){
+        showFileModal(res.gid);
+      } else {
+        switchTab('tasks');
+      }
+    }catch(e){
+      await customAlert('添加失败: '+e.message);
+    }
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
     return;
   }
 
@@ -481,7 +521,7 @@ document.addEventListener('keydown',e=>{
   let autoCooldown=false;
   let lastText='';
   let lastDetectionTime=0;
-  const LINK_RE=/^(magnet:|https?:\/\/|ftp:\/\/|sftp:\/\/|ed2k:\/\/|thunder:\/\/)/i;
+  const LINK_RE=/^(magnet:|https?:\/\/|ftp:\/\/|sftp:\/\/|ed2k:\/\/|thunder:\/\/)|^(\/|~\/).*\.torrent$/i;  // also matches local .torrent file paths
   const CLIPBOARD_WINDOW_MS=30000;  // 30秒内复制的链接才响应
 
   function tryAutoPaste(text, force){
