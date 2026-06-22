@@ -416,7 +416,14 @@ $('addBtn').onclick=async()=>{
     try{
       const res=await post('/api/add',{url});
       if(!res||res.ok===false){
-        await customAlert(res?.error||'未找到可下载的种子源');
+        // Copy file name to clipboard so user can search it manually
+        const parsed=await post('/api/ed2k_parse',{url});
+        if(parsed&&parsed.name){
+          try{await navigator.clipboard.writeText(parsed.name)}catch(e){}
+          await customAlert(res?.error||'未找到可下载的种子源','\n\n文件名已复制到剪贴板，可直接在浏览器搜索。');
+        }else{
+          await customAlert(res?.error||'未找到可下载的种子源');
+        }
         $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
         return;
       }

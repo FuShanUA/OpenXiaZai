@@ -1599,6 +1599,17 @@ def api_add():
     return jsonify(engine.add(url))
 
 
+@app.route("/api/ed2k_parse", methods=["POST"])
+def api_ed2k_parse():
+    """Parse an ed2k link to extract file name/size/hash (no search)."""
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    parsed = parse_ed2k_url(url)
+    if parsed:
+        return jsonify(ok=True, name=parsed["name"], size=parsed["size"], hash=parsed["hash"])
+    return jsonify(ok=False)
+
+
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
     data = request.get_json(force=True)
