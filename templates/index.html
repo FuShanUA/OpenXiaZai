@@ -230,8 +230,8 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       <div id="biliAudioFormats" style="display:flex;flex-wrap:wrap;gap:4px"></div>
     </div>
     <!-- 未登录提示 -->
-    <div id="biliNoLogin" style="display:none;font-size:12px;color:var(--warn);margin-top:6px">
-      ⚠ 未登录，最高仅可获取480P画质。扫码登录B站即可获取1080P+。
+    <div id="biliNoLogin" style="display:none;font-size:12px;color:var(--muted);margin-top:6px">
+      💡 已可选720P直链（无需登录）。扫码登录可获取1080P+画质。
     </div>
     <!-- 登录状态 -->
     <div id="biliLoggedIn" style="display:none;font-size:12px;color:var(--accent2);margin-top:6px"></div>
@@ -942,16 +942,32 @@ function updateBiliFormats(data){
   const audioFmts=data.audio_formats||[];
   const fmtEl=$('biliFormats');
   fmtEl.innerHTML='';
-  // Build quality buttons — prefer H264 for ffmpeg compatibility
-  // Group by quality_id, show codec options within
-  const qualityGroups={};
-  fmts.forEach(f=>{
-    if(!qualityGroups[f.quality_id])qualityGroups[f.quality_id]={label:f.label,items:[]};
-    qualityGroups[f.quality_id].items.push(f);
-  });
-  for(const[qid,group] of Object.entries(qualityGroups)){
-    // For each quality, show codec options
-    group.items.forEach(f=>{
+  // Separate legacy (直链) and DASH formats for clear display
+  const legacyFmts=fmts.filter(f=>f.is_legacy);
+  const dashFmts=fmts.filter(f=>f.is_dash);
+
+  // Show legacy formats first (无需登录!)
+  if(legacyFmts.length){
+    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--accent2);margin-right:4px">✅ 无需登录：</span>';
+    legacyFmts.forEach(f=>{
+      const b=document.createElement('button');
+      b.className='btn sm';
+      b.textContent=f.label+(f.total_size?' · '+fmtB(f.total_size):'');
+      b.dataset.qid=f.quality_id;
+      b.dataset.cid=f.codec_id||0;
+      b.onclick=()=>{
+        biliSelectedQuality=f.quality_id;
+        biliSelectedCodec=f.codec_id||0;
+        fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
+        b.classList.add('primary');
+      };
+      fmtEl.appendChild(b);
+    });
+  }
+  // Show DASH formats (需登录获取1080P+)
+  if(dashFmts.length){
+    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--muted);margin-left:6px;margin-right:4px">'+(legacyFmts.length?'需登录：':'')+'</span>';
+    dashFmts.forEach(f=>{
       const b=document.createElement('button');
       b.className='btn sm';
       b.textContent=f.label+(f.codec?' · '+f.codec:'')+(f.bandwidth?' · '+Math.round(f.bandwidth/1000)+'kbps':'');
@@ -966,9 +982,15 @@ function updateBiliFormats(data){
       fmtEl.appendChild(b);
     });
   }
-  // Auto-select best quality, H264 preferred
-  if(fmts.length){
-    let best=fmts.find(f=>f.codec_id===7)||fmts[0];
+  // Auto-select best legacy format (720P 直链, no login needed!)
+  if(legacyFmts.length){
+    const best=legacyFmts[0];
+    biliSelectedQuality=best.quality_id;
+    biliSelectedCodec=best.codec_id||0;
+    const bestBtn=fmtEl.querySelector('[data-qid="'+best.quality_id+'"][data-cid="'+(best.codec_id||0)+'"]');
+    if(bestBtn)bestBtn.classList.add('primary');
+  }else if(fmts.length){
+    const best=fmts.find(f=>f.codec_id===7)||fmts[0];
     biliSelectedQuality=best.quality_id;
     biliSelectedCodec=best.codec_id;
     const bestBtn=fmtEl.querySelector('[data-qid="'+best.quality_id+'"][data-cid="'+best.codec_id+'"]');
@@ -1006,6 +1028,10 @@ function updateBiliFormats(data){
 function hideBiliPreview(){biliData=null;$('biliPreview').style.display='none';$('url').value=''}
 async function doBiliDownload(audioOnly){
   if(!biliData)return;
+  const fmt=biliData.formats||[];
+  // Find the selected format to check if it's legacy
+  const selected=fmt.find(f=>f.quality_id===biliSelectedQuality&&f.codec_id===biliSelectedCodec);
+  const isLegacy=selected&&selected.is_legacy;
   const res=await post('/api/download_bili',{
     bvid:biliData.bvid,
     cid:biliData.cid,
@@ -1014,6 +1040,7 @@ async function doBiliDownload(audioOnly){
     quality_id:audioOnly?0:(biliSelectedQuality||32),
     codec_id:audioOnly?0:(biliSelectedCodec||7),
     audio_id:audioOnly?0:(biliSelectedAudio||0),
+    is_legacy:isLegacy,
   });
   if(res&&res.ok){hideBiliPreview();switchTab('tasks')}
   else{await customAlert(res?.error||'下载失败');return false}
