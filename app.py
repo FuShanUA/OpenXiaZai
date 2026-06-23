@@ -131,6 +131,162 @@ def _detect_login_required(html):
     return ''
 
 
+def _extract_with_playwright(url):
+    """使用 Playwright 无头浏览器渲染页面，拦截网络请求中的 m3u8/mp4 URL。
+
+    这能处理 requests 无法看到的 JS 动态内容：
+    - 执行页面中的 JavaScript（Brightcove/Bizzabo等播放器会初始化）
+    - 拦截浏览器发出的网络请求（m3u8 manifest、mp4 视频流）
+    - 自动从 Chrome 复用 cookie（登录态）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    video_urls = []       # m3u8/mp4 URLs intercepted from network
+    page_title = ""
+    page_poster = ""
+
+    try:
+        with sync_playwright() as p:
+            # Use persistent context with Chrome's user data — inherits ALL login cookies
+            # No need to manually read Chrome's cookie database
+            chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+            if os.path.exists(chrome_profile):
+                context = p.chromium.launch_persistent_context(
+                    chrome_profile,
+                    headless=True,
+                    channel="chrome",
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+            else:
+                # Fallback: fresh browser without cookies
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context()
+
+            # Intercept network responses to capture video URLs
+            def handle_response(response):
+                resp_url = response.url
+                # Capture m3u8 manifests (highest priority — adaptive bitrate)
+                if '.m3u8' in resp_url:
+                    video_urls.append(("m3u8", resp_url))
+                # Capture mp4/webm video streams (must be > 500KB to be real video, not a thumbnail)
+                elif any(ext in resp_url for ext in ['.mp4', '.webm']):
+                    try:
+                        cl = int(response.headers.get("content-length", "0") or "0")
+                        if cl > 500000:  # > 500KB = likely video stream
+                            video_urls.append(("direct", resp_url))
+                    except Exception:
+                        video_urls.append(("direct", resp_url))
+
+            page = context.new_page()
+            page.on("response", handle_response)
+
+            try:
+                page.goto(url, wait_until="networkidle", timeout=20000)
+            except Exception:
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    page.wait_for_timeout(5000)
+                except Exception:
+                    pass
+
+            # Extract title from the rendered page
+            try:
+                page_title = page.title() or ""
+                # Clean up title (remove site name suffix)
+                for suffix in [" | Gartner", " - Bizzabo", " | Bizzabo", " — Vimeo", " | YouTube"]:
+                    if suffix in page_title:
+                        page_title = page_title.split(suffix)[0].strip()
+            except Exception:
+                pass
+
+            # Extract poster/thumbnail from rendered DOM
+            try:
+                page_poster = page.evaluate("""
+                    () => {
+                        const og = document.querySelector('meta[property="og:image"]');
+                        return og ? og.content : '';
+                    }
+                """) or ""
+            except Exception:
+                pass
+
+            # Try to find <video> element in rendered DOM
+            try:
+                video_src = page.evaluate("""
+                    () => {
+                        const v = document.querySelector('video');
+                        if (v) return v.src || v.currentSrc || '';
+                        const s = document.querySelectorAll('video source');
+                        if (s.length) return s[0].src || '';
+                        return '';
+                    }
+                """)
+                if video_src and not any(u[1] == video_src for u in video_urls):
+                    vtype = "m3u8" if '.m3u8' in video_src else "direct"
+                    video_urls.append((vtype, video_src))
+            except Exception:
+                pass
+
+            # Click play button if present (triggers video stream loading)
+            try:
+                play_btn = page.query_selector(
+                    '[class*="play"], [aria-label*="Play"], [aria-label*="播放"], '
+                    '.vjs-big-play-button, .play-btn, .play-button, [data-play]'
+                )
+                if play_btn:
+                    play_btn.click()
+                    page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
+            context.close()
+
+    except Exception:
+        return None
+
+    if not video_urls:
+        return None
+
+    # Deduplicate and prefer m3u8 (most versatile)
+    seen = set()
+    best_url = ""
+    best_type = ""
+    all_urls = []  # for format selection
+    for vtype, vurl in video_urls:
+        if vurl in seen:
+            continue
+        seen.add(vurl)
+        all_urls.append({"url": vurl, "type": vtype})
+        if vtype == "m3u8" and (not best_url or best_type != "m3u8"):
+            best_url = vurl
+            best_type = "m3u8"
+        elif vtype == "direct" and not best_url:
+            best_url = vurl
+            best_type = "direct"
+
+    if not best_url:
+        return None
+
+    title = page_title or _extract_title_from_url(url)
+
+    return {
+        "ok": True, "title": title, "poster": page_poster,
+        "m3u8_url": best_url, "magnet": "", "type": best_type,
+    }
+
+
+def _extract_title_from_url(url):
+    """Fallback: derive a title from the URL path."""
+    from urllib.parse import urlparse
+    path = urlparse(url).path.rstrip('/')
+    segments = path.split('/')
+    return segments[-1] if segments else "视频"
+
+
+
 def _extract_with_ytdlp(url):
     """使用 yt-dlp（带浏览器 cookie）回退提取视频。
 
@@ -491,6 +647,11 @@ def extract_video(url):
             title = _extract_title(html)
             return {"ok": True, "title": title, "poster": poster,
                     "magnet": magnet, "m3u8_url": "", "type": "torrent"}
+
+        # 策略 5.5: Playwright 无头浏览器渲染 — 执行JS，拦截m3u8/mp4网络请求
+        pw_result = _extract_with_playwright(url)
+        if pw_result and pw_result.get("ok"):
+            return pw_result
 
         # 策略 6: yt-dlp 回退 — 用浏览器 cookie 尝试提取需登录的视频
         yt_result = _extract_with_ytdlp(url)
