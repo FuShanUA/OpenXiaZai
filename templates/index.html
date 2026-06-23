@@ -537,7 +537,12 @@ $('addBtn').onclick=async()=>{
         $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
         return;
       }
-      showCxPreview(res);
+      // yt-dlp fallback returns yt_media type — show YT preview card
+      if(res.type==='yt_media'&&res.formats&&res.formats.length){
+        showYtPreview(res);
+      }else{
+        showCxPreview(res);
+      }
     }catch(e){await customAlert('解析失败: '+e.message)}
     $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
     return;

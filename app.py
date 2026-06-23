@@ -131,6 +131,173 @@ def _detect_login_required(html):
     return ''
 
 
+def _extract_with_ytdlp(url):
+    """使用 yt-dlp（带浏览器 cookie）回退提取视频。
+
+    当通用解析器无法从HTML中提取视频时，yt-dlp可以：
+    1. 自动识别网站类型（支持1800+站点）
+    2. 从浏览器 cookie 中获取登录态（Chrome/Safari）
+    3. 处理需登录的付费内容
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    # Try with browser cookies first (handles login-required content)
+    for browser in ['chrome', 'safari']:
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'skip_download': True,
+                'cookiesfrombrowser': (browser,),
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+            if not info:
+                continue
+
+            title = info.get('title', '') or '未知视频'
+            thumbnail = info.get('thumbnail', '') or ''
+            duration = info.get('duration', 0) or 0
+            uploader = info.get('uploader', '') or ''
+            description = (info.get('description', '') or '')[:200]
+            platform = info.get('extractor_key', '') or ''
+
+            # Build format list for preview card
+            formats_raw = info.get('formats', []) or []
+            formats = []
+            seen_heights = set()
+            for f in formats_raw:
+                height = f.get('height') or 0
+                ext = f.get('ext', '') or ''
+                vcodec = f.get('vcodec', '') or ''
+                acodec = f.get('acodec', '') or ''
+                vbr = f.get('vbr') or 0
+                abr = f.get('abr') or 0
+                tbr = f.get('tbr') or 0
+                format_id = f.get('format_id', '') or ''
+                filesize = f.get('filesize') or f.get('filesize_approx') or 0
+
+                is_video_audio = vcodec != 'none' and acodec != 'none'
+                is_video_only = vcodec != 'none' and (acodec == 'none' or not acodec)
+                is_audio_only = vcodec == 'none' and acodec != 'none'
+
+                dedup_key = None
+                if is_video_audio:
+                    dedup_key = ('va', height, ext)
+                elif is_video_only:
+                    dedup_key = ('v', height, ext)
+                elif is_audio_only:
+                    dedup_key = ('a', int(abr), ext)
+                if dedup_key and dedup_key in seen_heights:
+                    continue
+                if dedup_key:
+                    seen_heights.add(dedup_key)
+
+                # Build display label
+                label = ''
+                if height:
+                    label = f'{height}P'
+                elif is_audio_only and abr:
+                    label = f'{int(abr)}kbps'
+                elif tbr:
+                    label = f'{int(tbr)}kbps'
+
+                if label and ext:
+                    label += f' · {ext}'
+                if label and filesize:
+                    label += f' · {_fmt_size(filesize)}'
+
+                if not label:
+                    label = format_id or 'unknown'
+
+                formats.append({
+                    'format_id': format_id,
+                    'label': label,
+                    'is_video_audio': is_video_audio,
+                    'is_video_only': is_video_only,
+                    'is_audio_only': is_audio_only,
+                    'height': height,
+                    'width': f.get('width') or 0,
+                    'ext': ext,
+                    'tbr': tbr,
+                    'filesize': filesize,
+                })
+
+            # Keep format list manageable
+            formats = formats[:15]
+
+            return {
+                "ok": True, "type": "yt_media",
+                "title": title, "poster": thumbnail,
+                "m3u8_url": "", "magnet": "",
+                "duration": duration, "uploader": uploader,
+                "description": description, "platform": platform or 'yt-dlp',
+                "url": url, "formats": formats,
+            }
+
+        except Exception:
+            continue
+
+    # All browsers failed — try without cookies (for public content yt-dlp handles better)
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'skip_download': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if info:
+            title = info.get('title', '') or '未知视频'
+            thumbnail = info.get('thumbnail', '') or ''
+            platform = info.get('extractor_key', '') or ''
+            formats_raw = info.get('formats', []) or []
+            formats = []
+            for f in formats_raw[:10]:
+                height = f.get('height') or 0
+                ext = f.get('ext', '') or ''
+                label = f'{height}P · {ext}' if height else f.get('format_id', '')
+                formats.append({
+                    'format_id': f.get('format_id', ''),
+                    'label': label,
+                    'is_video_audio': f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none',
+                    'is_video_only': f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') == 'none',
+                    'is_audio_only': f.get('vcodec', 'none') == 'none' and f.get('acodec', 'none') != 'none',
+                })
+            return {
+                "ok": True, "type": "yt_media",
+                "title": title, "poster": thumbnail,
+                "m3u8_url": "", "magnet": "",
+                "duration": info.get('duration', 0) or 0,
+                "uploader": info.get('uploader', '') or '',
+                "description": (info.get('description', '') or '')[:200],
+                "platform": platform or 'yt-dlp',
+                "url": url, "formats": formats,
+            }
+    except Exception:
+        pass
+
+    return None
+
+
+def _fmt_size(size):
+    """Format file size in human-readable format."""
+    if not size:
+        return ''
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f'{size:.1f} {unit}'
+        size /= 1024
+    return f'{size:.1f} TB'
+
+
 def _extract_from_video_tag(html, base_url):
     """从 HTML 的 <video> / <source> 标签中提取视频地址。"""
     # <video src="...">
@@ -324,6 +491,11 @@ def extract_video(url):
             title = _extract_title(html)
             return {"ok": True, "title": title, "poster": poster,
                     "magnet": magnet, "m3u8_url": "", "type": "torrent"}
+
+        # 策略 6: yt-dlp 回退 — 用浏览器 cookie 尝试提取需登录的视频
+        yt_result = _extract_with_ytdlp(url)
+        if yt_result and yt_result.get("ok"):
+            return yt_result
 
         return {"ok": False, "error": "未解析出可下载内容",
                 "hint": _detect_login_required(html)}
