@@ -53,6 +53,33 @@ def classify(url):
             return "yt_media"
         if re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', u):
             return "yt_media"
+        # 微博 — yt-dlp handler
+        if re.match(r'https?://(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn)/', u):
+            return "weibo"
+        # 抖音 — yt-dlp handler
+        if re.match(r'https?://(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com)/', u):
+            return "douyin"
+        # TikTok — yt-dlp handler
+        if re.match(r'https?://(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)/', u):
+            return "tiktok"
+        # Facebook — yt-dlp handler
+        if re.match(r'https?://(www\.)?facebook\.com/', u) and ('/video' in u or '/watch' in u or '/reel' in u or '/posts' in u or '/permalink' in u):
+            return "facebook"
+        # Spotify — yt-dlp handler
+        if re.match(r'https?://open\.spotify\.com/(track|album|playlist|episode|show)/', u):
+            return "spotify"
+        # 网易云音乐 — yt-dlp handler
+        if re.match(r'https?://music\.163\.com/#/(song|album|playlist|dj|mv)/', u):
+            return "netease"
+        # 快手 — yt-dlp handler
+        if re.match(r'https?://(www\.)?(kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com)/', u):
+            return "kuaishou"
+        # 小红书 — yt-dlp handler
+        if re.match(r'https?://(www\.)?(xiaohongshu\.com|xhslink\.com)/', u):
+            return "xiaohongshu"
+        # 西瓜视频 — yt-dlp handler
+        if re.match(r'https?://(www\.)?ixigua\.com/', u):
+            return "ixigua"
         if "pan.quark.cn" in u or "quark.cn" in u:
             return "quark"
         if any(h in u for h in ("pan.baidu.com", "115.com", "aliyundrive", "alipan.com")):
@@ -674,8 +701,17 @@ TYPES = {
     "http": "HTTP 直链",
     "ftp": "FTP",
     "ed2k": "电驴→种子搜索",
-    "yt_media": "YouTube/X 视频",
+    "yt_media": "YouTube 视频",
     "bilibili": "B站视频",
+    "weibo": "微博视频",
+    "douyin": "抖音视频",
+    "tiktok": "TikTok 视频",
+    "facebook": "Facebook 视频",
+    "spotify": "Spotify 音乐",
+    "netease": "网易音乐",
+    "kuaishou": "快手视频",
+    "xiaohongshu": "小红书",
+    "ixigua": "西瓜视频",
     "quark": "夸克网盘",
     "cloud": "网盘链接",
     "thunder": "迅雷链接",
@@ -1533,6 +1569,14 @@ class Engine:
         # YouTube/X links: use yt-dlp to extract info for preview
         if t == "yt_media":
             return self._extract_yt_info(url)
+        # All yt-dlp supported platforms (微博/抖音/TikTok/Facebook/Spotify/etc)
+        yt_dlp_types = {"weibo", "douyin", "tiktok", "facebook", "spotify",
+                        "netease", "kuaishou", "xiaohongshu", "ixigua"}
+        if t in yt_dlp_types:
+            result = self._extract_yt_info(url)
+            if result and result.get("ok"):
+                result["type"] = t
+            return result
         # Bilibili links: use DASH API to extract info for preview
         if t == "bilibili":
             return self._extract_bili_info(url)
@@ -2437,9 +2481,16 @@ class Engine:
     # ---- YouTube/X video extraction & download (yt-dlp) ----
     def _extract_yt_info(self, url):
         """Use yt-dlp to extract video metadata (title, thumbnail, available formats).
-        Returns a preview card dict for the frontend."""
+        Returns a preview card dict for the frontend.
+        Tries without cookies first, then with browser cookies for sites requiring login."""
         try:
             import yt_dlp
+        except ImportError:
+            return {"ok": False, "error": "yt-dlp 未安装", "type": classify(url) or "yt_media"}
+
+        # Try without cookies first (fast, works for public content like YouTube)
+        info = None
+        try:
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
@@ -2448,115 +2499,133 @@ class Engine:
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+        except Exception:
+            info = None
 
-            if not info:
-                return {"ok": False, "error": "未获取到视频信息", "type": "yt_media"}
-
-            title = info.get('title', '') or '未知视频'
-            thumbnail = info.get('thumbnail', '') or ''
-            duration = info.get('duration', 0) or 0
-            uploader = info.get('uploader', '') or ''
-            description = (info.get('description', '') or '')[:200]
-
-            # Collect available formats for user selection
-            formats_raw = info.get('formats', []) or []
-            formats = []
-            seen_heights = set()
-            for f in formats_raw:
-                ftype = f.get('type', 'unknown')
-                # Skip storyboards, trailers, and purely audio-only formats without video
-                if ftype == 'storyboard' or f.get('acodec') == 'none' and f.get('vcodec') == 'none':
-                    continue
-                height = f.get('height') or 0
-                ext = f.get('ext', '') or ''
-                vcodec = f.get('vcodec', '') or ''
-                acodec = f.get('acodec', '') or ''
-                filesize = f.get('filesize') or f.get('filesize_approx') or 0
-                vbr = f.get('vbr') or 0
-                abr = f.get('abr') or 0
-                tbr = f.get('tbr') or 0
-                format_id = f.get('format_id', '') or ''
-                format_note = f.get('format_note', '') or ''
-
-                # Determine display category
-                is_video_audio = vcodec != 'none' and acodec != 'none'
-                is_video_only = vcodec != 'none' and (acodec == 'none' or not acodec)
-                is_audio_only = vcodec == 'none' and acodec != 'none'
-
-                # Deduplicate same-height video+audio combined formats (prefer best)
-                # and same-bitrate audio-only formats
-                dedup_key = None
-                if is_video_audio:
-                    dedup_key = ('va', height, ext)
-                elif is_video_only:
-                    dedup_key = ('v', height, ext)
-                elif is_audio_only:
-                    dedup_key = ('a', int(abr), ext)
-
-                if dedup_key and dedup_key in seen_heights:
+        # If no-cookie attempt failed, try with browser cookies
+        if not info:
+            for browser in ('chrome', 'safari'):
+                try:
+                    ydl_opts = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'extract_flat': False,
+                        'skip_download': True,
+                        'cookiesfrombrowser': (browser,),
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                    if info:
+                        break
+                except Exception:
                     continue
 
-                # Only include meaningful formats
-                label = ''
-                if height:
-                    label = f'{height}p'
-                elif is_audio_only and abr:
-                    label = f'{int(abr)}kbps'
-                else:
-                    label = format_note or ext
+        if not info:
+            return {"ok": False, "error": "未获取到视频信息", "type": classify(url) or "yt_media"}
 
-                # Quality score for sorting (higher = better)
-                quality = (height or 0) * 100 + (tbr or 0)
+        title = info.get('title', '') or '未知视频'
+        thumbnail = info.get('thumbnail', '') or ''
+        duration = info.get('duration', 0) or 0
+        uploader = info.get('uploader', '') or ''
+        description = (info.get('description', '') or '')[:200]
 
-                if is_video_audio or is_video_only or is_audio_only:
-                    if dedup_key:
-                        seen_heights.add(dedup_key)
-                    formats.append({
-                        'format_id': format_id,
-                        'label': label,
-                        'ext': ext,
-                        'height': height,
-                        'filesize': filesize,
-                        'tbr': int(tbr) if tbr else 0,
-                        'vcodec': vcodec,
-                        'acodec': acodec,
-                        'is_video_audio': is_video_audio,
-                        'is_video_only': is_video_only,
-                        'is_audio_only': is_audio_only,
-                        'quality': quality,
-                    })
+        # Collect available formats for user selection
+        formats_raw = info.get('formats', []) or []
+        formats = []
+        seen_heights = set()
+        for f in formats_raw:
+            ftype = f.get('type', 'unknown')
+            # Skip storyboards, trailers, and purely audio-only formats without video
+            if ftype == 'storyboard' or f.get('acodec') == 'none' and f.get('vcodec') == 'none':
+                continue
+            height = f.get('height') or 0
+            ext = f.get('ext', '') or ''
+            vcodec = f.get('vcodec', '') or ''
+            acodec = f.get('acodec', '') or ''
+            filesize = f.get('filesize') or f.get('filesize_approx') or 0
+            vbr = f.get('vbr') or 0
+            abr = f.get('abr') or 0
+            tbr = f.get('tbr') or 0
+            format_id = f.get('format_id', '') or ''
+            format_note = f.get('format_note', '') or ''
 
-            # Sort: video+audio best first, then video-only, then audio-only
-            formats.sort(key=lambda f: (
-                0 if f['is_video_audio'] else (1 if f['is_video_only'] else 2),
-                -f['quality']
-            ))
+            # Determine display category
+            is_video_audio = vcodec != 'none' and acodec != 'none'
+            is_video_only = vcodec != 'none' and (acodec == 'none' or not acodec)
+            is_audio_only = vcodec == 'none' and acodec != 'none'
 
-            # Limit to top 20 formats to keep UI manageable
-            formats = formats[:20]
+            # Deduplicate same-height video+audio combined formats (prefer best)
+            # and same-bitrate audio-only formats
+            dedup_key = None
+            if is_video_audio:
+                dedup_key = ('va', height, ext)
+            elif is_video_only:
+                dedup_key = ('v', height, ext)
+            elif is_audio_only:
+                dedup_key = ('a', int(abr), ext)
 
-            # Determine if URL is YouTube or X
-            is_youtube = bool(re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', url.lower()))
-            is_x = bool(re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', url.lower()))
-            platform = 'YouTube' if is_youtube else ('X/Twitter' if is_x else '视频平台')
+            if dedup_key and dedup_key in seen_heights:
+                continue
 
-            return {
-                "ok": True,
-                "type": "yt_media",
-                "title": title,
-                "poster": thumbnail,
-                "m3u8_url": "",
-                "magnet": "",
-                "duration": duration,
-                "uploader": uploader,
-                "description": description,
-                "platform": platform,
-                "formats": formats,
-                "url": url,
-                "yt_source": True,
-            }
-        except Exception as e:
-            return {"ok": False, "error": f"获取视频信息失败：{str(e)}", "type": "yt_media"}
+            # Only include meaningful formats
+            label = ''
+            if height:
+                label = f'{height}p'
+            elif is_audio_only and abr:
+                label = f'{int(abr)}kbps'
+            else:
+                label = format_note or ext
+
+            # Quality score for sorting (higher = better)
+            quality = (height or 0) * 100 + (tbr or 0)
+
+            if is_video_audio or is_video_only or is_audio_only:
+                if dedup_key:
+                    seen_heights.add(dedup_key)
+                formats.append({
+                    'format_id': format_id,
+                    'label': label,
+                    'ext': ext,
+                    'height': height,
+                    'filesize': filesize,
+                    'tbr': int(tbr) if tbr else 0,
+                    'vcodec': vcodec,
+                    'acodec': acodec,
+                    'is_video_audio': is_video_audio,
+                    'is_video_only': is_video_only,
+                    'is_audio_only': is_audio_only,
+                    'quality': quality,
+                })
+
+        # Sort: video+audio best first, then video-only, then audio-only
+        formats.sort(key=lambda f: (
+            0 if f['is_video_audio'] else (1 if f['is_video_only'] else 2),
+            -f['quality']
+        ))
+
+        # Limit to top 20 formats to keep UI manageable
+        formats = formats[:20]
+
+        # Determine if URL is YouTube or X
+        is_youtube = bool(re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', url.lower()))
+        is_x = bool(re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', url.lower()))
+        platform = 'YouTube' if is_youtube else ('X/Twitter' if is_x else '视频平台')
+
+        return {
+            "ok": True,
+            "type": classify(url) or "yt_media",
+            "title": title,
+            "poster": thumbnail,
+            "m3u8_url": "",
+            "magnet": "",
+            "duration": duration,
+            "uploader": uploader,
+            "description": description,
+            "platform": platform,
+            "formats": formats,
+            "url": url,
+            "yt_source": True,
+        }
 
     def _download_yt_thread(self, gid, url, format_id, title):
         """Download YouTube/X video in background thread using yt-dlp."""
