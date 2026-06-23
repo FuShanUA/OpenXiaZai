@@ -9,7 +9,7 @@ import re
 import hashlib
 import threading
 import requests
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response
 
 # Ensure yt_dlp can be found: check common locations
 _venv_ytdlp = os.path.join(os.path.expanduser("~"), "cc", ".venv", "lib")
@@ -644,8 +644,10 @@ def _extract_bili_video(bvid, page=1, sessdata=None):
             if key in seen:
                 continue
             seen.add(key)
-            # Only include DASH formats that are BETTER than legacy (1080P+)
-            if qid in seen_legacy_qn and qid <= 64:
+            # Only include DASH formats that offer BETTER quality than legacy
+            # Legacy already gives 720P without login, so skip 480P/360P DASH (no value)
+            # Only 1080P+ DASH (needs login) is worth showing
+            if qid < 80:
                 continue
             qlabel = BILI_QUALITY_MAP.get(qid, f'{qid}P')
             codec_label = BILI_CODEC_MAP.get(codec, f'codec{codec}')
@@ -3025,8 +3027,20 @@ def api_bili_cookie():
         return jsonify(ok=False, error=str(e))
 
 
-
-@app.route("/api/choose_dir", methods=["POST"])
+@app.route("/api/bili_poster")
+def api_bili_poster():
+    """代理B站封面图片（B站CDN要求Referer，浏览器img标签无法直接加载）。"""
+    url = request.args.get("url", "").strip()
+    if not url or not url.startswith("http"):
+        return "", 400
+    # Force HTTPS
+    url = url.replace("http://", "https://")
+    try:
+        r = requests.get(url, headers=BILI_HEADERS, timeout=10)
+        content_type = r.headers.get("Content-Type", "image/jpeg")
+        return Response(r.content, content_type=content_type)
+    except Exception:
+        return "", 404@app.route("/api/choose_dir", methods=["POST"])
 def api_choose_dir():
     """打开系统原生文件夹选择对话框，返回选中的路径。"""
     try:

@@ -226,7 +226,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     </div>
     <!-- 音频画质选择 -->
     <div id="biliAudioSection" style="display:none;margin-bottom:6px">
-      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">音频画质：</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">音频质量：</div>
       <div id="biliAudioFormats" style="display:flex;flex-wrap:wrap;gap:4px"></div>
     </div>
     <!-- 未登录提示 -->
@@ -904,7 +904,7 @@ function showBiliPreview(data,url){
   }
   $('biliMeta').textContent=meta;
   $('biliDesc').textContent=data.description||'';
-  if(data.poster){$('biliPoster').src=data.poster;$('biliPoster').style.display=''}
+  if(data.poster){$('biliPoster').src='/api/bili_poster?url='+encodeURIComponent(data.poster);$('biliPoster').style.display=''}
   else{$('biliPoster').style.display='none'}
 
   // 分P选择
@@ -955,27 +955,33 @@ function updateBiliFormats(data){
   const legacyFmts=fmts.filter(f=>f.is_legacy);
   const dashFmts=fmts.filter(f=>f.is_dash);
 
-  // Show legacy formats first (无需登录!)
+  // Show legacy formats (无需登录!)
   if(legacyFmts.length){
-    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--accent2);margin-right:4px">✅ 无需登录：</span>';
+    const legacyGroup=document.createElement('div');
+    legacyGroup.style.cssText='display:flex;flex-wrap:wrap;gap:4px;align-items:center';
+    legacyGroup.innerHTML='<span style="font-size:11px;color:var(--accent2);margin-right:4px">✅ 无需登录：</span>';
     legacyFmts.forEach(f=>{
       const b=document.createElement('button');
       b.className='btn sm';
       b.textContent=f.label+(f.total_size?' · '+fmtB(f.total_size):'');
       b.dataset.qid=f.quality_id;
       b.dataset.cid=f.codec_id||0;
+      b.dataset.legacy='1';
       b.onclick=()=>{
         biliSelectedQuality=f.quality_id;
         biliSelectedCodec=f.codec_id||0;
         fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
         b.classList.add('primary');
       };
-      fmtEl.appendChild(b);
+      legacyGroup.appendChild(b);
     });
+    fmtEl.appendChild(legacyGroup);
   }
-  // Show DASH formats (需登录获取1080P+)
+  // Show DASH formats (1080P+, needs login)
   if(dashFmts.length){
-    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--muted);margin-left:6px;margin-right:4px">'+(legacyFmts.length?'需登录：':'')+'</span>';
+    const dashGroup=document.createElement('div');
+    dashGroup.style.cssText='display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:4px';
+    dashGroup.innerHTML='<span style="font-size:11px;color:var(--muted);margin-right:4px">🔒 登录后可用：</span>';
     dashFmts.forEach(f=>{
       const b=document.createElement('button');
       b.className='btn sm';
@@ -988,8 +994,16 @@ function updateBiliFormats(data){
         fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
         b.classList.add('primary');
       };
-      fmtEl.appendChild(b);
+      dashGroup.appendChild(b);
     });
+    fmtEl.appendChild(dashGroup);
+  }
+  // If no DASH formats available (not logged in), show hint for 1080P
+  if(!dashFmts.length){
+    const hint=document.createElement('div');
+    hint.style.cssText='font-size:12px;color:var(--muted);margin-top:6px';
+    hint.textContent='💡 扫码登录B站可获取1080P及以上画质';
+    fmtEl.appendChild(hint);
   }
   // Auto-select best legacy format (720P 直链, no login needed!)
   if(legacyFmts.length){
