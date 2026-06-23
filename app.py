@@ -69,7 +69,7 @@ def classify(url):
         if re.match(r'https?://open\.spotify\.com/(track|album|playlist|episode|show)/', u):
             return "spotify"
         # 网易云音乐 — yt-dlp handler
-        if re.match(r'https?://music\.163\.com/#/(song|album|playlist|dj|mv)/', u):
+        if re.match(r'https?://music\.163\.com/#/(song|album|playlist|dj|mv)', u):
             return "netease"
         # 快手 — yt-dlp handler
         if re.match(r'https?://(www\.)?(kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com)/', u):
