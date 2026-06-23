@@ -105,6 +105,32 @@ def _check_direct_video_url(url):
     return None
 
 
+def _detect_login_required(html):
+    """检测页面是否需要登录才能查看视频内容。返回提示字符串。"""
+    # Common patterns for gated/login-required content
+    patterns = [
+        (r'class="[^"]*login[^"]*modal[^"]*"', '页面包含登录弹窗，该视频可能需要注册/登录后才能观看'),
+        (r'class="[^"]*register[^"]*modal[^"]*"', '该内容需要注册后才能观看'),
+        (r'class="[^"]*sign-in[^"]*"', '该内容需要登录后才能观看'),
+        (r'isJoined\s*[:=]\s*false', '该内容需要注册后才能观看（Webinar/直播类型）'),
+        (r'requires\s+registration', '该内容需要注册后才能观看'),
+        (r'loginRequired\s*[:=]\s*true', '该内容需要登录后才能观看'),
+        (r'class="[^"]*gated[^"]*content[^"]*"', '该内容为付费/受限内容，需要登录后才能观看'),
+        (r'class="[^"]*paywall[^"]*"', '该内容有付费墙限制，需要订阅后才能观看'),
+        (r'class="[^"]*restricted[^"]*"', '该内容受访问限制，可能需要登录'),
+        (r'class="[^"]*auth[^"]*required[^"]*"', '该内容需要认证后才能观看'),
+        # Brightcove player without video ID loaded = gated content
+        (r'brightcove[^>]*data-video-id=""', '视频播放器未加载视频（可能需要登录）'),
+    ]
+    for pattern, hint in patterns:
+        if re.search(pattern, html, re.IGNORECASE):
+            return hint
+    # If page has Brightcove/Bizzabo but no video content loaded
+    if 'brightcove' in html.lower() and 'video' not in html.lower():
+        return '页面使用了Brightcove视频播放器，但视频内容可能需要登录后加载'
+    return ''
+
+
 def _extract_from_video_tag(html, base_url):
     """从 HTML 的 <video> / <source> 标签中提取视频地址。"""
     # <video src="...">
@@ -299,7 +325,8 @@ def extract_video(url):
             return {"ok": True, "title": title, "poster": poster,
                     "magnet": magnet, "m3u8_url": "", "type": "torrent"}
 
-        return {"ok": False, "error": "未解析出可下载内容"}
+        return {"ok": False, "error": "未解析出可下载内容",
+                "hint": _detect_login_required(html)}
 
     except requests.RequestException as e:
         return {"ok": False, "error": "未解析出可下载内容"}

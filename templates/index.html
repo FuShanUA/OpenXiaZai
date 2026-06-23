@@ -531,7 +531,9 @@ $('addBtn').onclick=async()=>{
       // 网页链接：尝试通用视频提取
       const res=await post('/api/parse',{url});
       if(!res||res.ok===false){
-        await customAlert('未解析出可下载内容');
+        const errMsg=res?.error||'未解析出可下载内容';
+        const hint=res?.hint||'';
+        await customAlert(errMsg+(hint?'\n\n'+hint:''),{title:'解析失败'});
         $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
         return;
       }
