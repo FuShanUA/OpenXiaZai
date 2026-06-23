@@ -510,7 +510,9 @@ $('addBtn').onclick=async()=>{
     try{
       const res=await post('/api/yt_info',{url});
       if(!res||res.ok===false){
-        await customAlert(res?.error||'获取视频信息失败');
+        const errMsg=res?.error||'获取视频信息失败';
+        const hint=res?.hint||'';
+        await customAlert(errMsg+(hint?'\n\n'+hint:''),{title:'获取失败'});
         $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
         return;
       }
@@ -527,7 +529,9 @@ $('addBtn').onclick=async()=>{
     try{
       const res=await post('/api/yt_info',{url});
       if(!res||res.ok===false){
-        await customAlert(res?.error||'获取视频信息失败');
+        const errMsg=res?.error||'获取视频信息失败';
+        const hint=res?.hint||'';
+        await customAlert(errMsg+(hint?'\n\n'+hint:''),{title:'获取失败'});
         $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
         return;
       }

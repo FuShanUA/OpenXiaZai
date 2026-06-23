@@ -2490,6 +2490,7 @@ class Engine:
 
         # Try without cookies first (fast, works for public content like YouTube)
         info = None
+        drm_detected = False
         try:
             ydl_opts = {
                 'quiet': True,
@@ -2499,8 +2500,16 @@ class Engine:
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-        except Exception:
+        except Exception as e:
+            err = str(e)
+            if 'DRM' in err:
+                drm_detected = True
             info = None
+
+        if drm_detected:
+            return {"ok": False, "error": "该内容受DRM保护，无法直接下载",
+                    "type": classify(url) or "yt_media",
+                    "hint": "Spotify等平台有数字版权保护。可尝试在网页中搜索同名歌曲的YouTube版本。"}
 
         # If no-cookie attempt failed, try with browser cookies
         if not info:
