@@ -98,7 +98,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 .rec .rsub{font-size:11px;color:var(--muted);margin-top:2px}
 .pill{font-variant-numeric:tabular-nums;font-size:11px;color:var(--muted)}
 /* modal */
-.modal-overlay{position:absolute;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-start;justify-content:center;padding-top:28px;pointer-events:none}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-start;justify-content:center;padding-top:28px;pointer-events:none;z-index:200}
 .modal-overlay:nth-child(2){padding-top:48px}
 .modal-overlay:nth-child(3){padding-top:68px}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:680px;max-width:94vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5);pointer-events:auto}
@@ -283,7 +283,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="clear-bar" id="clearHist" style="display:none"><button class="btn sm danger" id="clearHistBtn">移至回收站</button></div>
   <div class="clear-bar" id="clearTrash" style="display:none"><button class="btn sm danger" id="clearTrashBtn">清空回收站</button><button class="btn sm danger" id="clearTrashFilesBtn" style="margin-left:6px">清空回收站并删除文件</button></div>
 </div>
-<div id="modalContainer" style="position:fixed;inset:0;pointer-events:none;z-index:100"></div>
+<div id="modalContainer" style="position:fixed;inset:0;pointer-events:none;z-index:300"></div>
 <!-- template for file picker modals -->
 <template id="modalTemplate">
 <div class="modal-overlay">
@@ -339,7 +339,16 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="ctx-item" data-action="clear">✕ 清空输入框</div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script>
+// Global JS error handler — show errors on page for easy diagnosis
+window.onerror=function(msg,url,line,col,err){
+  const d=document.getElementById('jsError');
+  if(d){d.textContent='JS Error: '+msg+' (line '+line+')';d.style.display='block'}
+  console.error('JS Error:',msg,url,line,col,err);
+};
+</script>
+<div id="jsError" style="display:none;background:#d32f2f;color:#fff;font-size:13px;padding:8px 16px;text-align:center;z-index:99999;position:fixed;bottom:0;left:0;right:0"></div>
+<script src="/static/qrcode.min.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube/X 视频",bilibili:"B站视频"};
