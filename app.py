@@ -2521,6 +2521,12 @@ class Engine:
                     continue
 
         if not info:
+            # yt-dlp failed — try Playwright with Chrome persistent context
+            # Works for sites w/ encrypted cookies (抖音/微博) and JS-only video players
+            result = _extract_with_playwright(url)
+            if result and result.get("ok"):
+                result["type"] = classify(url) or "yt_media"
+                return result
             return {"ok": False, "error": "未获取到视频信息", "type": classify(url) or "yt_media"}
 
         title = info.get('title', '') or '未知视频'
