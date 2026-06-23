@@ -381,6 +381,14 @@ BILI_QUALITY_MAP = {
 BILI_CODEC_MAP = {7: 'H264', 12: 'H265', 13: 'AV1'}
 BILI_AUDIO_MAP = {30250: '杜比全景声', 30251: 'Hi-Res', 30232: '192Kbps', 30216: '128Kbps'}
 
+# B站扫码登录 — 生成二维码、轮询扫码状态、自动保存Cookie
+BILI_QR_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://passport.bilibili.com',
+    'Origin': 'https://passport.bilibili.com',
+}
+
 # B站 SESSDATA cookie（可选，提供后可获取1080P以上画质）
 # 存在 ~/.bilibili_cookie.json 中，格式: {"SESSDATA": "..."}
 _BILI_COOKIE_FILE = os.path.join(os.path.expanduser("~"), ".bilibili_cookie.json")
@@ -397,6 +405,105 @@ def _get_bili_cookie():
         except Exception:
             pass
     return {}
+
+
+def _bili_qr_generate():
+    """生成B站扫码登录二维码，返回 qrcode_key + 二维码URL。
+    二维码图片由前端JS生成（避免依赖 PIL）。"""
+    gen_url = 'https://passport.bilibili.com/x/passport-login/web/qrcode/generate'
+    r = requests.get(gen_url, headers=BILI_QR_HEADERS, timeout=10)
+    data = r.json()
+    if data.get('code') != 0:
+        return {"ok": False, "error": f"生成二维码失败：{data.get('message', '未知错误')}"}
+
+    result = data.get('data', {}) or {}
+    qrcode_key = result.get('qrcode_key', '')
+    qr_url = result.get('url', '')
+
+    return {
+        "ok": True,
+        "qrcode_key": qrcode_key,
+        "qr_url": qr_url,
+    }
+
+
+def _bili_qr_poll(qrcode_key):
+    """轮询B站扫码状态，返回扫码结果。
+    状态码：86101=未扫码，86102=已扫码待确认，0=已确认成功
+    成功时返回 SESSDATA 等 cookie 信息，自动保存到文件。
+    """
+    poll_url = f'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}'
+    r = requests.get(poll_url, headers=BILI_QR_HEADERS, timeout=10)
+    data = r.json()
+
+    result = data.get('data', {}) or {}
+    code = result.get('code', -1)
+    message = result.get('message', '')
+    # Refresh_token for long-term validity
+    refresh_token = result.get('refresh_token', '')
+
+    if code == 0:
+        # Success! Extract SESSDATA from response cookies
+        sessdata = ''
+        # The API returns cookies in the 'Set-Cookie' header of the response
+        # or in the response body's 'url' field
+        # Let's parse from response headers
+        cookie_headers = r.headers.get('Set-Cookie', '')
+        for part in cookie_headers.split(','):
+            part = part.strip()
+            if 'SESSDATA' in part:
+                # Extract value: "SESSDATA=xxx; Path=..."
+                m = re.match(r'SESSDATA=([^;]+)', part)
+                if m:
+                    sessdata = m.group(1)
+                    break
+
+        # If SESSDATA not in headers, try parsing from the response body
+        if not sessdata:
+            # Some B站 API versions return it differently
+            # Check the redirect_url for cookie info
+            redirect_url = result.get('url', '')
+            if redirect_url:
+                # Parse SESSDATA from URL parameters
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(redirect_url)
+                qs = parse_qs(parsed.query)
+                if 'SESSDATA' in qs:
+                    sessdata = qs['SESSDATA'][0]
+
+        # Also check the response JSON body directly (newer API)
+        if not sessdata and result.get('SESSDATA'):
+            sessdata = result['SESSDATA']
+
+        if sessdata:
+            # Auto-save to cookie file
+            cookie_data = {"SESSDATA": sessdata}
+            if refresh_token:
+                cookie_data["refresh_token"] = refresh_token
+            json.dump(cookie_data, open(_BILI_COOKIE_FILE, "w"))
+            return {
+                "ok": True,
+                "code": 0,
+                "message": "登录成功！Cookie已自动保存，下次解析B站视频将使用登录身份获取1080P+画质。",
+                "SESSDATA": sessdata,
+            }
+        else:
+            # Login confirmed but couldn't extract SESSDATA
+            # The Set-Cookie might be missing because we're polling, not the actual login page
+            # Try to extract from the full response text
+            return {
+                "ok": False,
+                "code": 0,
+                "message": "扫码确认成功，但无法提取登录Cookie。请手动设置Cookie。",
+                "error": "Cookie提取失败",
+            }
+
+    elif code == 86101:
+        return {"ok": True, "code": 86101, "message": "等待扫码"}
+    elif code == 86102:
+        return {"ok": True, "code": 86102, "message": "已扫码，等待确认"}
+    else:
+        return {"ok": False, "code": code, "message": message or "扫码登录失败"}
 
 
 def _resolve_bili_url(url):
@@ -2784,6 +2891,64 @@ def api_download_bili():
     result = engine.start_bili_download(bvid, cid, quality_id, codec_id, audio_id,
                                         title=title or "B站视频", aid=aid)
     return jsonify(result)
+
+
+@app.route("/api/bili_qr_generate")
+def api_bili_qr_generate():
+    """生成B站扫码登录二维码图片。"""
+    return jsonify(_bili_qr_generate())
+
+
+@app.route("/api/bili_qr_poll")
+def api_bili_qr_poll():
+    """轮询B站扫码登录状态。qrcode_key 作为 query param。"""
+    qrcode_key = request.args.get("qrcode_key", "").strip()
+    if not qrcode_key:
+        return jsonify(ok=False, error="缺少 qrcode_key"), 400
+    return jsonify(_bili_qr_poll(qrcode_key))
+
+
+@app.route("/api/bili_login_status")
+def api_bili_login_status():
+    """检查B站登录状态：是否已保存Cookie，以及是否仍然有效。"""
+    cookies = _get_bili_cookie()
+    if not cookies:
+        return jsonify(ok=True, logged_in=False, message="未登录")
+    # Validate cookie by calling nav API
+    headers = {**BILI_HEADERS}
+    headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+    try:
+        r = requests.get('https://api.bilibili.com/x/web-interface/nav', headers=headers, timeout=10)
+        nav_data = r.json()
+        is_login = nav_data.get('data', {}).get('isLogin', False)
+        uname = nav_data.get('data', {}).get('uname', '')
+        vip_type = nav_data.get('data', {}).get('vipType', 0)  # 0=无, 1=月度, 2=年度
+        vip_label = nav_data.get('data', {}).get('vipLabel', {})
+        vip_status = vip_label.get('text', '')
+        if is_login:
+            vip_info = vip_status or ('大会员' if vip_type in (1, 2) else '非会员')
+            return jsonify(ok=True, logged_in=True, username=uname, vip=vip_info, message=f"已登录：{uname}（{vip_info}）")
+        else:
+            # Cookie expired — delete it
+            if os.path.exists(_BILI_COOKIE_FILE):
+                try:
+                    os.remove(_BILI_COOKIE_FILE)
+                except Exception:
+                    pass
+            return jsonify(ok=True, logged_in=False, message="Cookie已过期，请重新登录")
+    except Exception as e:
+        return jsonify(ok=True, logged_in=False, message="检查登录状态失败")
+
+
+@app.route("/api/bili_logout", methods=["POST"])
+def api_bili_logout():
+    """删除保存的B站Cookie（退出登录）。"""
+    if os.path.exists(_BILI_COOKIE_FILE):
+        try:
+            os.remove(_BILI_COOKIE_FILE)
+        except Exception:
+            pass
+    return jsonify(ok=True, message="已退出B站登录")
 
 
 @app.route("/api/bili_cookie", methods=["POST"])

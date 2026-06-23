@@ -231,13 +231,38 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     </div>
     <!-- 未登录提示 -->
     <div id="biliNoLogin" style="display:none;font-size:12px;color:var(--warn);margin-top:6px">
-      ⚠ 未登录Cookie，最高仅可获取480P画质。如需1080P+，请先设置B站Cookie。
+      ⚠ 未登录，最高仅可获取480P画质。扫码登录B站即可获取1080P+。
     </div>
+    <!-- 登录状态 -->
+    <div id="biliLoggedIn" style="display:none;font-size:12px;color:var(--accent2);margin-top:6px"></div>
     <div class="row" style="margin-top:10px;gap:8px">
       <button class="btn go" id="biliDownload">立即下载</button>
       <button class="btn" id="biliAudioOnly">仅下载音频</button>
-      <button class="btn" id="biliSetCookie">设置Cookie</button>
+      <button class="btn" id="biliLoginBtn">扫码登录</button>
+      <button class="btn" id="biliLogoutBtn" style="display:none;color:var(--danger)">退出登录</button>
       <button class="btn" id="biliCancel">取消</button>
+    </div>
+  </div>
+
+  <!-- B站扫码登录弹窗 -->
+  <div class="modal-overlay" id="biliQrOverlay" style="display:none">
+    <div class="modal" style="width:400px">
+      <div class="modal-head"><h3>扫码登录B站</h3></div>
+      <div class="modal-body" style="padding:20px;text-align:center">
+        <div id="biliQrImage" style="margin-bottom:12px;display:flex;justify-content:center">
+          <img id="biliQrImg" style="width:200px;height:200px;border-radius:8px;border:1px solid var(--border)" alt="二维码">
+        </div>
+        <div id="biliQrStatus" style="font-size:14px;color:var(--text);margin-bottom:8px">
+          请打开B站APP扫描二维码登录
+        </div>
+        <div style="font-size:12px;color:var(--muted)">
+          登录后可获取1080P及以上画质视频
+        </div>
+      </div>
+      <div class="modal-foot" style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn" id="biliQrRefresh">刷新二维码</button>
+        <button class="btn" id="biliQrClose">关闭</button>
+      </div>
     </div>
   </div>
 
@@ -314,6 +339,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="ctx-item" data-action="clear">✕ 清空输入框</div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube/X 视频",bilibili:"B站视频"};
@@ -901,8 +927,10 @@ function showBiliPreview(data,url){
   // 画质选择
   updateBiliFormats(data);
 
-  // 未登录提示
+  // 未登录提示 / 登录状态
   $('biliNoLogin').style.display=data.has_login?'none':'block';
+  $('biliLoggedIn').style.display='none';
+  checkBiliLogin();
 
   $('biliPreview').style.display='block';
   $('url').value='';$('typeHint').style.display='none';
@@ -994,37 +1022,142 @@ async function doBiliDownload(audioOnly){
 $('biliDownload').onclick=async()=>{await doBiliDownload(false)};
 $('biliAudioOnly').onclick=async()=>{await doBiliDownload(true)};
 $('biliCancel').onclick=hideBiliPreview;
-$('biliSetCookie').onclick=async()=>{
-  // Prompt for SESSDATA cookie
-  const sessdata=await customPrompt('请输入B站 SESSDATA Cookie 值：\n\n获取方式：浏览器登录 bilibili.com → F12 开发者工具 → Application → Cookies → SESSDATA',{title:'设置B站Cookie',okText:'保存'});
-  if(sessdata){
-    const res=await post('/api/bili_cookie',{SESSDATA:sessdata});
-    if(res&&res.ok){
-      await customAlert(res.message||'Cookie已保存');
-      // Re-parse with new cookie
-      if(biliData&&biliData.url){
-        const info=await post('/api/bili_info',{url:biliData.url||$('url').value});
-        if(info&&info.ok)updateBiliFormats(info);
-      }
-    }
-  }
+
+// ---- B站扫码登录 ----
+let biliQrKey=null;
+let biliQrTimer=null;
+
+$('biliLoginBtn').onclick=showBiliQrLogin;
+$('biliLogoutBtn').onclick=async()=>{
+  await post('/api/bili_logout');
+  checkBiliLogin();
 };
 
-// Simple prompt dialog (reuses confirm overlay layout)
-async function customPrompt(message,opts){
-  opts=opts||{};
-  return new Promise(resolve=>{
-    $('confirmMsg').textContent=message;
-    $('confirmTitle').textContent=opts.title||'输入';
-    const okBtn=$('confirmOk'),noBtn=$('confirmNo');
-    okBtn.textContent=opts.okText||'确定';
-    noBtn.textContent=opts.cancelText||'取消';
-    okBtn.className='btn primary';
-    noBtn.style.display='';
-    $('confirmOverlay').style.display='flex';
-    okBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(true)};
-    noBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(null)};
-  });
+async function showBiliQrLogin(){
+  $('biliQrOverlay').style.display='flex';
+  $('biliQrStatus').textContent='请打开B站APP扫描二维码登录';
+  $('biliQrStatus').style.color='var(--text)';
+  $('biliQrImage').style.display='flex';
+  await generateBiliQr();
+}
+
+async function generateBiliQr(){
+  if(biliQrTimer){clearInterval(biliQrTimer);biliQrTimer=null}
+  $('biliQrImg').style.display='none';
+  $('biliQrStatus').textContent='正在生成二维码…';
+  $('biliQrStatus').style.color='var(--text)';
+
+  try{
+    const res=await (await fetch('/api/bili_qr_generate')).json();
+    if(!res||!res.ok){
+      $('biliQrStatus').textContent=res?.error||'生成二维码失败';
+      $('biliQrStatus').style.color='var(--danger)';
+      return;
+    }
+    biliQrKey=res.qrcode_key;
+    // Render QR code from URL using canvas (no external dependency)
+    renderQrToCanvas(res.qr_url);
+    $('biliQrStatus').textContent='请打开B站APP扫描二维码登录';
+    $('biliQrStatus').style.color='var(--text)';
+    // Start polling every 2 seconds
+    biliQrTimer=setInterval(pollBiliQr,2000);
+  }catch(e){
+    $('biliQrStatus').textContent='生成二维码失败: '+e.message;
+    $('biliQrStatus').style.color='var(--danger)';
+  }
+}
+
+// Render QR code from URL using canvas (uses qrcode-generator library)
+function renderQrToCanvas(text){
+  const canvas=document.createElement('canvas');
+  const size=200;
+  canvas.width=size;canvas.height=size;
+  const ctx=canvas.getContext('2d');
+  try{
+    const qr=qrcode(0,'M');
+    qr.addData(text);
+    qr.make();
+    const modules=qr.getModuleCount();
+    const cellSize=size/modules;
+    ctx.fillStyle='#ffffff';
+    ctx.fillRect(0,0,size,size);
+    ctx.fillStyle='#000000';
+    for(let r=0;r<modules;r++){
+      for(let c=0;c<modules;c++){
+        if(qr.isDark(r,c)){
+          ctx.fillRect(c*cellSize,r*cellSize,cellSize,cellSize);
+        }
+      }
+    }
+    $('biliQrImg').src=canvas.toDataURL('image/png');
+    $('biliQrImg').style.display='block';
+  }catch(e){
+    $('biliQrStatus').textContent='二维码生成失败';
+    $('biliQrStatus').style.color='var(--danger)';
+  }
+}
+
+
+async function pollBiliQr(){
+  if(!biliQrKey)return;
+  try{
+    const res=await (await fetch('/api/bili_qr_poll?qrcode_key='+biliQrKey)).json();
+    const code=res.code;
+    if(code===0){
+      // Login success!
+      clearInterval(biliQrTimer);biliQrTimer=null;
+      $('biliQrStatus').textContent='✅ 登录成功！';
+      $('biliQrStatus').style.color='var(--accent2)';
+      $('biliQrImage').style.display='none';
+      // Auto-close after 1.5 seconds
+      setTimeout(()=>{
+        $('biliQrOverlay').style.display='none';
+        checkBiliLogin();
+        // Re-parse current video if showing
+        if(biliData){
+          const info=await post('/api/bili_info',{url:biliData.url||$('url').value});
+          if(info&&info.ok)updateBiliFormats(info);
+        }
+      },1500);
+    }else if(code===86101){
+      $('biliQrStatus').textContent='等待扫码…';
+      $('biliQrStatus').style.color='var(--muted)';
+    }else if(code===86102){
+      $('biliQrStatus').textContent='已扫码，请在手机上确认登录…';
+      $('biliQrStatus').style.color='var(--accent)';
+    }else{
+      // Error or expired (86038)
+      clearInterval(biliQrTimer);biliQrTimer=null;
+      $('biliQrStatus').textContent=res.message||'二维码已过期，请刷新';
+      $('biliQrStatus').style.color='var(--warn)';
+    }
+  }catch(e){
+    clearInterval(biliQrTimer);biliQrTimer=null;
+  }
+}
+
+$('biliQrRefresh').onclick=generateBiliQr;
+$('biliQrClose').onclick=()=>{
+  if(biliQrTimer){clearInterval(biliQrTimer);biliQrTimer=null}
+  $('biliQrOverlay').style.display='none';
+};
+
+async function checkBiliLogin(){
+  try{
+    const res=await (await fetch('/api/bili_login_status')).json();
+    if(res&&res.logged_in){
+      $('biliLoggedIn').textContent='✅ '+res.message;
+      $('biliLoggedIn').style.display='block';
+      $('biliNoLogin').style.display='none';
+      $('biliLoginBtn').style.display='none';
+      $('biliLogoutBtn').style.display='inline-flex';
+    }else{
+      $('biliLoggedIn').style.display='none';
+      $('biliNoLogin').style.display='block';
+      $('biliLoginBtn').style.display='inline-flex';
+      $('biliLogoutBtn').style.display='none';
+    }
+  }catch(e){}
 }
 
 // ---- file selection modal (multi, draggable, stackable) ----
