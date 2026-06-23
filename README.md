@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体、YouTube/X 视频 (yt-dlp)
+- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体、YouTube/X 视频 (yt-dlp)、B站视频 (DASH流API)
 - **种子文件选择**：添加磁力/种子后弹出文件选择窗口，可勾选需要下载的文件，支持按类型筛选（视频/音乐/图片/文档）
 - **多任务并行**：支持同时下载最多 3 个任务，每个任务 16 线程
 - **DHT 加速**：内置 DHT 启动节点、持久化路由表、扩展 Tracker 列表，加速磁力链接解析

@@ -44,6 +44,7 @@ input[type=text]:focus{border-color:var(--accent)}
 .badge.m3u8{color:#c9a3ff}
 .badge.direct{color:#c9a3ff}
 .badge.yt_media{color:#ff5c5c}
+.badge.bilibili{color:#00a1d6}
 /* tabs */
 .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
 .tab{padding:8px 16px;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;
@@ -148,7 +149,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 <div class="wrap">
   <header>
     <div class="logo">⬇</div>
-    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X/Twitter</div></div>
+    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X/Twitter · B站</div></div>
     <div style="flex:1"></div>
     <button class="btn sm" id="settingsBtn" title="设置" style="font-size:22px;padding:4px 8px">⚙</button>
   </header>
@@ -156,7 +157,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="card">
     <div class="row">
       <div style="position:relative;flex:1">
-        <input type="text" id="url" placeholder="粘贴链接或种子文件路径：magnet:、http(s)://、ftp://、ed2k://、YouTube、X/Twitter、/path/file.torrent…" style="flex:1;padding-right:28px">
+        <input type="text" id="url" placeholder="粘贴链接：magnet:、http(s)://、ftp://、ed2k://、YouTube、X/Twitter、B站、种子文件路径…" style="flex:1;padding-right:28px">
         <button id="clearUrlBtn" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px 6px;display:none;line-height:1" title="清空">✕</button>
       </div>
       <button class="btn sm" id="menuBtn" title="更多操作">⋮</button>
@@ -200,6 +201,43 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       <button class="btn go" id="ytDownload">立即下载</button>
       <button class="btn" id="ytAudioOnly">仅下载音频</button>
       <button class="btn" id="ytCancel">取消</button>
+    </div>
+  </div>
+
+  <!-- B站视频预览卡片 -->
+  <div class="card" id="biliPreview" style="display:none">
+    <div class="row" style="align-items:flex-start">
+      <img id="biliPoster" style="width:160px;height:90px;object-fit:cover;border-radius:8px;flex-shrink:0;background:var(--panel2)" alt="">
+      <div style="flex:1;min-width:0;padding-left:8px">
+        <div id="biliTitle" style="font-weight:600;font-size:15px;margin-bottom:4px"></div>
+        <div id="biliMeta" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+        <div id="biliDesc" style="font-size:12px;color:var(--muted);max-height:40px;overflow:hidden;text-overflow:ellipsis"></div>
+      </div>
+    </div>
+    <!-- 分P选择（多页视频） -->
+    <div id="biliPageSelect" style="margin-top:8px;display:none">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">选择分P：</div>
+      <div id="biliPages" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+    </div>
+    <!-- 画质选择 -->
+    <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">选择画质：</div>
+      <div id="biliFormats" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px"></div>
+    </div>
+    <!-- 音频画质选择 -->
+    <div id="biliAudioSection" style="display:none;margin-bottom:6px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">音频画质：</div>
+      <div id="biliAudioFormats" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+    </div>
+    <!-- 未登录提示 -->
+    <div id="biliNoLogin" style="display:none;font-size:12px;color:var(--warn);margin-top:6px">
+      ⚠ 未登录Cookie，最高仅可获取480P画质。如需1080P+，请先设置B站Cookie。
+    </div>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <button class="btn go" id="biliDownload">立即下载</button>
+      <button class="btn" id="biliAudioOnly">仅下载音频</button>
+      <button class="btn" id="biliSetCookie">设置Cookie</button>
+      <button class="btn" id="biliCancel">取消</button>
     </div>
   </div>
 
@@ -278,7 +316,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube/X 视频"};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube/X 视频",bilibili:"B站视频"};
 const UNSUP={quark:1,cloud:1,thunder:1};
 let activeTab='tasks';
 let cur=null;
@@ -339,9 +377,11 @@ $('url').addEventListener('input',()=>{
   else if(/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v))t='direct';
   else if(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(v))t='yt_media';
   else if(/https?:\/\/(www\.)?(x\.com|twitter\.com|t\.co)\//.test(v))t='yt_media';
+  else if(/https?:\/\/(www\.)?bilibili\.com\/(video|bangumi)\//.test(v))t='bilibili';
+  else if(/https?:\/\/b23\.tv\//.test(v))t='bilibili';
   else if(v.startsWith('http'))t='http';
   h.style.display='block';
-  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(t==='yt_media'?' · 将使用 yt-dlp 下载':'');
+  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(t==='yt_media'?' · 将使用 yt-dlp 下载':'')+(t==='bilibili'?' · 将使用B站API解析':'');
 });
 
 // 判断 URL 是否为直接文件下载（不走视频提取）
@@ -422,6 +462,22 @@ $('addBtn').onclick=async()=>{
       }
       showYtPreview(res);
     }catch(e){await customAlert('获取视频信息失败: '+e.message)}
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
+  // B站视频链接：使用B站API提取视频信息
+  if(/https?:\/\/(www\.)?bilibili\.com\/(video|bangumi)\//.test(v)||/https?:\/\/b23\.tv\//.test(v)){
+    $('addBtn').disabled=true;$('addBtn').textContent='解析B站视频…';
+    try{
+      const res=await post('/api/bili_info',{url});
+      if(!res||res.ok===false){
+        await customAlert(res?.error||'获取B站视频信息失败');
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      showBiliPreview(res,url);
+    }catch(e){await customAlert('获取B站视频信息失败: '+e.message)}
     $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
     return;
   }
@@ -577,6 +633,7 @@ document.addEventListener('keydown',e=>{
   if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
   if($('cxPreview').style.display==='block'){hideCxPreview();return}
   if($('ytPreview').style.display==='block'){hideYtPreview();return}
+  if($('biliPreview').style.display==='block'){hideBiliPreview();return}
   const gids=Object.keys(modalStates);
   if(gids.length>0){cancelModal(gids[gids.length-1],true)}
 });
@@ -596,6 +653,7 @@ document.addEventListener('keydown',e=>{
     if(Object.keys(modalStates).length>0)return;
     if($('cxPreview').style.display==='block')return;
   if($('ytPreview').style.display==='block')return;
+  if($('biliPreview').style.display==='block')return;
     if($('confirmOverlay').style.display==='flex')return;
     if(document.activeElement===$('url')&&$('url').value===t)return;
     if(t===lastText)return;
@@ -785,6 +843,189 @@ async function doYtDownload(audioOnly){
 $('ytDownload').onclick=async()=>{await doYtDownload(false)};
 $('ytAudioOnly').onclick=async()=>{await doYtDownload(true)};
 $('ytCancel').onclick=hideYtPreview;
+
+// ---- B站视频预览卡片 ----
+let biliData=null;
+let biliSelectedQuality=null;
+let biliSelectedCodec=null;
+let biliSelectedAudio=null;
+let biliSelectedPage=null;
+function showBiliPreview(data,url){
+  biliData=data;
+  biliSelectedQuality=null;
+  biliSelectedCodec=null;
+  biliSelectedAudio=null;
+  biliSelectedPage=data.selected_page?.page||1;
+  const platformTag='<span class="badge bilibili" style="margin-left:6px">'+esc(data.platform||'B站')+'</span>';
+  $('biliTitle').innerHTML=esc(data.title||'未知视频')+platformTag;
+  // Meta line
+  let meta='';
+  if(data.uploader)meta+=esc(data.uploader);
+  if(data.duration){
+    const d=data.duration;
+    if(d>=3600){meta+=' · '+Math.floor(d/3600)+'时'+Math.floor((d%3600)/60)+'分'+Math.round(d%60)+'秒'}
+    else if(d>=60){meta+=' · '+Math.floor(d/60)+'分'+Math.round(d%60)+'秒'}
+    else{meta+=' · '+d+'秒'}
+  }
+  $('biliMeta').textContent=meta;
+  $('biliDesc').textContent=data.description||'';
+  if(data.poster){$('biliPoster').src=data.poster;$('biliPoster').style.display=''}
+  else{$('biliPoster').style.display='none'}
+
+  // 分P选择
+  const pages=data.page_list||[];
+  const pageEl=$('biliPages');
+  pageEl.innerHTML='';
+  if(pages.length>1){
+    $('biliPageSelect').style.display='block';
+    pages.forEach(p=>{
+      const b=document.createElement('button');
+      b.className='btn sm'+(p.page===biliSelectedPage?' primary':'');
+      b.textContent='P'+p.page+' '+esc(p.title||'');
+      b.title=esc(p.title||'')+' · '+p.duration+'秒';
+      b.dataset.page=p.page;
+      b.onclick=async()=>{
+        biliSelectedPage=p.page;
+        pageEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
+        b.classList.add('primary');
+        // Re-fetch info for new page
+        const res=await post('/api/bili_info',{url:url,page:p.page});
+        if(res&&res.ok){updateBiliFormats(res)}
+      };
+      pageEl.appendChild(b);
+    });
+  }else{
+    $('biliPageSelect').style.display='none';
+  }
+
+  // 画质选择
+  updateBiliFormats(data);
+
+  // 未登录提示
+  $('biliNoLogin').style.display=data.has_login?'none':'block';
+
+  $('biliPreview').style.display='block';
+  $('url').value='';$('typeHint').style.display='none';
+}
+
+function updateBiliFormats(data){
+  biliData=data;
+  const fmts=data.formats||[];
+  const audioFmts=data.audio_formats||[];
+  const fmtEl=$('biliFormats');
+  fmtEl.innerHTML='';
+  // Build quality buttons — prefer H264 for ffmpeg compatibility
+  // Group by quality_id, show codec options within
+  const qualityGroups={};
+  fmts.forEach(f=>{
+    if(!qualityGroups[f.quality_id])qualityGroups[f.quality_id]={label:f.label,items:[]};
+    qualityGroups[f.quality_id].items.push(f);
+  });
+  for(const[qid,group] of Object.entries(qualityGroups)){
+    // For each quality, show codec options
+    group.items.forEach(f=>{
+      const b=document.createElement('button');
+      b.className='btn sm';
+      b.textContent=f.label+(f.codec?' · '+f.codec:'')+(f.bandwidth?' · '+Math.round(f.bandwidth/1000)+'kbps':'');
+      b.dataset.qid=f.quality_id;
+      b.dataset.cid=f.codec_id;
+      b.onclick=()=>{
+        biliSelectedQuality=f.quality_id;
+        biliSelectedCodec=f.codec_id;
+        fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
+        b.classList.add('primary');
+      };
+      fmtEl.appendChild(b);
+    });
+  }
+  // Auto-select best quality, H264 preferred
+  if(fmts.length){
+    let best=fmts.find(f=>f.codec_id===7)||fmts[0];
+    biliSelectedQuality=best.quality_id;
+    biliSelectedCodec=best.codec_id;
+    const bestBtn=fmtEl.querySelector('[data-qid="'+best.quality_id+'"][data-cid="'+best.codec_id+'"]');
+    if(bestBtn)bestBtn.classList.add('primary');
+  }
+
+  // Audio formats
+  const audioEl=$('biliAudioFormats');
+  audioEl.innerHTML='';
+  if(audioFmts.length>1){
+    $('biliAudioSection').style.display='block';
+    audioFmts.forEach(a=>{
+      const b=document.createElement('button');
+      b.className='btn sm';
+      b.textContent=a.label+(a.bandwidth?' · '+Math.round(a.bandwidth/1000)+'kbps':'');
+      b.dataset.aid=a.audio_id;
+      b.onclick=()=>{
+        biliSelectedAudio=a.audio_id;
+        audioEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
+        b.classList.add('primary');
+      };
+      audioEl.appendChild(b);
+    });
+    // Auto-select highest audio quality
+    const bestAudio=audioFmts[audioFmts.length-1];
+    biliSelectedAudio=bestAudio.audio_id;
+    const bestAudioBtn=audioEl.querySelector('[data-aid="'+bestAudio.audio_id+'"]');
+    if(bestAudioBtn)bestAudioBtn.classList.add('primary');
+  }else{
+    $('biliAudioSection').style.display='none';
+    biliSelectedAudio=audioFmts.length?audioFmts[0].audio_id:0;
+  }
+}
+
+function hideBiliPreview(){biliData=null;$('biliPreview').style.display='none';$('url').value=''}
+async function doBiliDownload(audioOnly){
+  if(!biliData)return;
+  const res=await post('/api/download_bili',{
+    bvid:biliData.bvid,
+    cid:biliData.cid,
+    aid:biliData.aid,
+    title:biliData.title,
+    quality_id:audioOnly?0:(biliSelectedQuality||32),
+    codec_id:audioOnly?0:(biliSelectedCodec||7),
+    audio_id:audioOnly?0:(biliSelectedAudio||0),
+  });
+  if(res&&res.ok){hideBiliPreview();switchTab('tasks')}
+  else{await customAlert(res?.error||'下载失败');return false}
+  return true;
+}
+$('biliDownload').onclick=async()=>{await doBiliDownload(false)};
+$('biliAudioOnly').onclick=async()=>{await doBiliDownload(true)};
+$('biliCancel').onclick=hideBiliPreview;
+$('biliSetCookie').onclick=async()=>{
+  // Prompt for SESSDATA cookie
+  const sessdata=await customPrompt('请输入B站 SESSDATA Cookie 值：\n\n获取方式：浏览器登录 bilibili.com → F12 开发者工具 → Application → Cookies → SESSDATA',{title:'设置B站Cookie',okText:'保存'});
+  if(sessdata){
+    const res=await post('/api/bili_cookie',{SESSDATA:sessdata});
+    if(res&&res.ok){
+      await customAlert(res.message||'Cookie已保存');
+      // Re-parse with new cookie
+      if(biliData&&biliData.url){
+        const info=await post('/api/bili_info',{url:biliData.url||$('url').value});
+        if(info&&info.ok)updateBiliFormats(info);
+      }
+    }
+  }
+};
+
+// Simple prompt dialog (reuses confirm overlay layout)
+async function customPrompt(message,opts){
+  opts=opts||{};
+  return new Promise(resolve=>{
+    $('confirmMsg').textContent=message;
+    $('confirmTitle').textContent=opts.title||'输入';
+    const okBtn=$('confirmOk'),noBtn=$('confirmNo');
+    okBtn.textContent=opts.okText||'确定';
+    noBtn.textContent=opts.cancelText||'取消';
+    okBtn.className='btn primary';
+    noBtn.style.display='';
+    $('confirmOverlay').style.display='flex';
+    okBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(true)};
+    noBtn.onclick=()=>{$('confirmOverlay').style.display='none';resolve(null)};
+  });
+}
 
 // ---- file selection modal (multi, draggable, stackable) ----
 const modalStates={};  // gid -> {overlay, timer, startTime}

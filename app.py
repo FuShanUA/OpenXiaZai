@@ -43,6 +43,11 @@ def classify(url):
         path_part = u.split("?")[0].split("#")[0]
         if path_part.endswith(".torrent"):
             return "torrent_url"
+        # Bilibili — dedicated API handler (DASH stream extraction + ffmpeg merge)
+        if re.match(r'https?://(www\.)?bilibili\.com/(video|bangumi)/', u):
+            return "bilibili"
+        if re.match(r'https?://b23\.tv/', u):
+            return "bilibili"
         # YouTube / X (Twitter) — dedicated yt-dlp handler
         if re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', u):
             return "yt_media"
@@ -308,6 +313,7 @@ TYPES = {
     "ftp": "FTP",
     "ed2k": "电驴→种子搜索",
     "yt_media": "YouTube/X 视频",
+    "bilibili": "B站视频",
     "quark": "夸克网盘",
     "cloud": "网盘链接",
     "thunder": "迅雷链接",
@@ -356,6 +362,277 @@ DHT_ENTRY_POINTS = [
     "dht.transmissionbt.com:6881",
     "dht.libtorrent.org:25401",
 ]
+
+# --------------------------------------------------------------------------- #
+#  Bilibili video extraction (DASH stream API + ffmpeg merge)
+# --------------------------------------------------------------------------- #
+
+BILI_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://www.bilibili.com',
+}
+
+BILI_QUALITY_MAP = {
+    127: '8K 超清', 120: '4K 超清', 116: '1080P 60帧',
+    112: '1080P 高码率', 80: '1080P 清晰', 74: '720P 高码率',
+    64: '720P', 48: '720P 60帧', 32: '480P', 16: '360P',
+}
+BILI_CODEC_MAP = {7: 'H264', 12: 'H265', 13: 'AV1'}
+BILI_AUDIO_MAP = {30250: '杜比全景声', 30251: 'Hi-Res', 30232: '192Kbps', 30216: '128Kbps'}
+
+# B站 SESSDATA cookie（可选，提供后可获取1080P以上画质）
+# 存在 ~/.bilibili_cookie.json 中，格式: {"SESSDATA": "..."}
+_BILI_COOKIE_FILE = os.path.join(os.path.expanduser("~"), ".bilibili_cookie.json")
+
+
+def _get_bili_cookie():
+    """读取用户保存的B站 SESSDATA cookie（用于获取1080P+画质）。"""
+    if os.path.exists(_BILI_COOKIE_FILE):
+        try:
+            data = json.load(open(_BILI_COOKIE_FILE))
+            sessdata = data.get("SESSDATA", "")
+            if sessdata:
+                return {"SESSDATA": sessdata}
+        except Exception:
+            pass
+    return {}
+
+
+def _resolve_bili_url(url):
+    """从B站 URL 中提取 BV 号或 bangumi epid。
+    支持: bilibili.com/video/BVxxxx, b23.tv/短链, bilibili.com/bangumi/play/epxxxx
+    返回: (mode, id)  mode='video'|'bangumi', id=BV号或epid
+    """
+    u = url.strip()
+    # b23.tv short link → follow redirect
+    if re.match(r'https?://b23\.tv/', u):
+        try:
+            r = requests.get(u, headers=BILI_HEADERS, timeout=10, allow_redirects=True)
+            u = r.url
+        except Exception:
+            pass
+    # bilibili.com/video/BVxxxx
+    m = re.search(r'/video/(BV[A-Za-z0-9]+)', u)
+    if m:
+        return ('video', m.group(1))
+    # bilibili.com/bangumi/play/epxxxx
+    m = re.search(r'/bangumi/play/ep(\d+)', u)
+    if m:
+        return ('bangumi', int(m.group(1)))
+    # bilibili.com/bangumi/play/ssxxxx (season)
+    m = re.search(r'/bangumi/play/ss(\d+)', u)
+    if m:
+        return ('season', int(m.group(1)))
+    return None
+
+
+def _extract_bili_video(bvid, page=1, sessdata=None):
+    """从B站视频 BV 号提取元数据和可用画质。
+    返回包含视频信息和 DASH 格式列表的字典，供前端预览卡片展示。
+    """
+    cookies = sessdata or _get_bili_cookie()
+    headers = {**BILI_HEADERS}
+    if cookies:
+        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+
+    # Step 1: Get video metadata
+    api_url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
+    r = requests.get(api_url, headers=headers, timeout=10)
+    data = r.json()
+    if data.get('code') != 0:
+        return {"ok": False, "error": f"获取视频信息失败：{data.get('message', '未知错误')}", "type": "bilibili"}
+
+    info = data['data']
+    title = info.get('title', '') or '未知视频'
+    pic = info.get('pic', '') or ''
+    duration = info.get('duration', 0) or 0
+    owner = (info.get('owner') or {}).get('name', '') or ''
+    desc = (info.get('desc', '') or '')[:200]
+
+    # Multi-page (分P) support
+    pages = info.get('pages', []) or []
+    page_list = []
+    for p in pages:
+        page_list.append({
+            'page': p.get('page', 1),
+            'title': p.get('part', '') or f'P{p.get("page", 1)}',
+            'cid': p.get('cid'),
+            'duration': p.get('duration', 0),
+        })
+
+    # Select the requested page
+    selected_page = None
+    for p in page_list:
+        if p['page'] == page:
+            selected_page = p
+            break
+    if not selected_page:
+        selected_page = page_list[0] if page_list else {'page': 1, 'title': title, 'cid': info.get('cid'), 'duration': duration}
+    cid = selected_page.get('cid') or info.get('cid')
+    aid = info.get('aid')
+
+    # Step 2: Get DASH stream URLs (playurl API)
+    # qn=120 requests highest quality; API will return available qualities
+    playurl = f'https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=120&fnval=16&fourk=1'
+    r2 = requests.get(playurl, headers=headers, timeout=10)
+    stream_data = r2.json()
+    if stream_data.get('code') != 0:
+        return {"ok": False, "error": f"获取视频流失败：{stream_data.get('message', '未知错误')}", "type": "bilibili"}
+
+    dash_info = stream_data['data']
+    dash = dash_info.get('dash', {}) or {}
+    video_streams = dash.get('video', []) or []
+    audio_streams = dash.get('audio', []) or []
+
+    # Build format list for frontend (deduplicate same quality+codec)
+    formats = []
+    seen = set()
+    for v in video_streams:
+        qid = v.get('id', 0)
+        codec = v.get('codecid', 0)
+        key = (qid, codec)
+        if key in seen:
+            continue
+        seen.add(key)
+        qlabel = BILI_QUALITY_MAP.get(qid, f'{qid}P')
+        codec_label = BILI_CODEC_MAP.get(codec, f'codec{codec}')
+        formats.append({
+            'quality_id': qid,
+            'codec_id': codec,
+            'label': qlabel,
+            'codec': codec_label,
+            'width': v.get('width', 0),
+            'height': v.get('height', 0),
+            'bandwidth': v.get('bandwidth', 0),
+            'video_url': v.get('baseUrl', '') or '',
+            'video_backup_urls': v.get('backupUrl', []) or [],
+            'mimeType': v.get('mimeType', ''),
+            'is_video': True,
+        })
+
+    audio_formats = []
+    seen_audio = set()
+    for a in audio_streams:
+        aid_ = a.get('id', 0)
+        key = aid_
+        if key in seen_audio:
+            continue
+        seen_audio.add(key)
+        alabel = BILI_AUDIO_MAP.get(aid_, f'{aid_}Kbps')
+        audio_formats.append({
+            'audio_id': aid_,
+            'label': alabel,
+            'bandwidth': a.get('bandwidth', 0),
+            'audio_url': a.get('baseUrl', '') or '',
+            'audio_backup_urls': a.get('backupUrl', []) or [],
+            'mimeType': a.get('mimeType', ''),
+            'is_audio': True,
+        })
+
+    return {
+        "ok": True,
+        "type": "bilibili",
+        "title": title,
+        "poster": pic,
+        "m3u8_url": "",
+        "magnet": "",
+        "duration": duration,
+        "uploader": owner,
+        "description": desc,
+        "platform": "B站",
+        "bvid": bvid,
+        "aid": aid,
+        "cid": cid,
+        "selected_page": selected_page,
+        "page_list": page_list,
+        "formats": formats,
+        "audio_formats": audio_formats,
+        "has_login": bool(cookies),
+        "bili_source": True,
+    }
+
+
+def _extract_bili_bangumi(epid, sessdata=None):
+    """从B站番剧 ep 链接提取视频信息。
+    番剧/影视剧需要 pgc API 获取 episode → cid，再用 playurl 获取流。
+    """
+    cookies = sessdata or _get_bili_cookie()
+    headers = {**BILI_HEADERS}
+    if cookies:
+        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+
+    # Get episode info from pgc API
+    api_url = f'https://api.bilibili.com/pgc/view/web/episode?ep_id={epid}'
+    r = requests.get(api_url, headers=headers, timeout=10)
+    data = r.json()
+    if data.get('code') != 0:
+        # Try alternate: get season info, find the ep
+        return {"ok": False, "error": f"获取番剧信息失败：{data.get('message', '未知错误')}。可能需要登录或该番剧不可用。", "type": "bilibili"}
+
+    result = data.get('result', {}) or {}
+    title = result.get('share_copy', '') or result.get('long_title', '') or '番剧'
+    pic = result.get('cover', '') or ''
+    duration = result.get('duration', 0) or 0
+    bvid = result.get('bvid', '') or ''
+    cid = result.get('cid', 0) or 0
+    aid = result.get('aid', 0) or 0
+
+    if not bvid or not cid:
+        return {"ok": False, "error": "无法获取番剧视频信息，可能需要登录Cookie。", "type": "bilibili"}
+
+    # Reuse the video extraction logic with the obtained bvid/cid
+    playurl = f'https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=120&fnval=16&fourk=1'
+    r2 = requests.get(playurl, headers=headers, timeout=10)
+    stream_data = r2.json()
+    if stream_data.get('code') != 0:
+        return {"ok": False, "error": f"获取视频流失败：{stream_data.get('message', '未知错误')}", "type": "bilibili"}
+
+    dash = stream_data['data'].get('dash', {}) or {}
+    video_streams = dash.get('video', []) or []
+    audio_streams = dash.get('audio', []) or []
+
+    formats = []
+    seen = set()
+    for v in video_streams:
+        qid, codec = v.get('id', 0), v.get('codecid', 0)
+        if (qid, codec) in seen: continue
+        seen.add((qid, codec))
+        formats.append({
+            'quality_id': qid, 'codec_id': codec,
+            'label': BILI_QUALITY_MAP.get(qid, f'{qid}P'),
+            'codec': BILI_CODEC_MAP.get(codec, f'codec{codec}'),
+            'width': v.get('width', 0), 'height': v.get('height', 0),
+            'bandwidth': v.get('bandwidth', 0),
+            'video_url': v.get('baseUrl', ''), 'video_backup_urls': v.get('backupUrl', []),
+            'mimeType': v.get('mimeType', ''), 'is_video': True,
+        })
+
+    audio_formats = []
+    seen_audio = set()
+    for a in audio_streams:
+        aid_ = a.get('id', 0)
+        if aid_ in seen_audio: continue
+        seen_audio.add(aid_)
+        audio_formats.append({
+            'audio_id': aid_, 'label': BILI_AUDIO_MAP.get(aid_, f'{aid_}Kbps'),
+            'bandwidth': a.get('bandwidth', 0),
+            'audio_url': a.get('baseUrl', ''), 'audio_backup_urls': a.get('backupUrl', []),
+            'mimeType': a.get('mimeType', ''), 'is_audio': True,
+        })
+
+    return {
+        "ok": True, "type": "bilibili",
+        "title": title, "poster": pic,
+        "m3u8_url": "", "magnet": "",
+        "duration": duration, "uploader": '', "description": '',
+        "platform": "B站番剧", "bvid": bvid, "aid": aid, "cid": cid,
+        "selected_page": {'page': 1, 'title': title, 'cid': cid, 'duration': duration},
+        "page_list": [{'page': 1, 'title': title, 'cid': cid, 'duration': duration}],
+        "formats": formats, "audio_formats": audio_formats,
+        "has_login": bool(cookies), "bili_source": True, "is_bangumi": True,
+    }
+
 
 # --------------------------------------------------------------------------- #
 #  aria2 RPC client
@@ -634,6 +911,8 @@ class Engine:
         self._m3u8_counter = 0
         self.yt_tasks = {}      # gid -> {url, title, state, progress, ...}
         self._yt_counter = 0
+        self.bili_tasks = {}    # gid -> {url, title, state, progress, ...}
+        self._bili_counter = 0
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
@@ -749,6 +1028,9 @@ class Engine:
         # YouTube/X links: use yt-dlp to extract info for preview
         if t == "yt_media":
             return self._extract_yt_info(url)
+        # Bilibili links: use DASH API to extract info for preview
+        if t == "bilibili":
+            return self._extract_bili_info(url)
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
@@ -1236,6 +1518,44 @@ class Engine:
                 "is_audio_only": info.get('_is_audio_only', False),
                 "platform": info.get('platform', ''),
             })
+        # 合并 Bilibili 下载任务
+        for gid, info in list(self.bili_tasks.items()):
+            if info.get('state') == 'removed':
+                continue
+            state = info.get('state', 'downloading')
+            output = info.get('output', '')
+            if state == 'finished':
+                if gid not in existing:
+                    existing.add(gid)
+                    self.records["history"].insert(0, {
+                        "gid": gid, "type": "bilibili", "name": info.get('title', 'B站视频'),
+                        "url": info.get('url', ''), "dir": self.save_path,
+                        "paths": [output] if output else [],
+                        "size": info.get('size', 0), "completed_at": int(time.time()),
+                    })
+                del self.bili_tasks[gid]
+                continue
+            pct = info.get('progress', 0)
+            items.append({
+                "gid": gid,
+                "type": "bilibili",
+                "name": info.get('title', 'B站视频'),
+                "state": state,
+                "progress": pct,
+                "size": info.get('size', 0),
+                "completed_size": 0,
+                "download_rate": info.get('download_rate', 0),
+                "upload_rate": 0,
+                "peers": 0,
+                "seeds": 0,
+                "dir": self.save_path,
+                "files": [],
+                "paths": [output] if output else [],
+                "url": info.get('url', ''),
+                "has_metadata": True,
+                "metadata_progress": 0,
+                "added_at": info.get('added_at', 0),
+            })
         return {
             "settings": {
                 "max_active": self.max_active,
@@ -1326,6 +1646,9 @@ class Engine:
         # 停止所有 yt-dlp 下载
         for gid in list(self.yt_tasks.keys()):
             self.stop_yt_download(gid, skip_trash=True)
+        # 停止所有 Bilibili 下载
+        for gid in list(self.bili_tasks.keys()):
+            self.stop_bili_download(gid, skip_trash=True)
 
     def clear_all_history(self):
         """Move all history records to trash."""
@@ -1874,6 +2197,288 @@ class Engine:
             return True
         return False
 
+    # ---- Bilibili DASH download (ffmpeg merge video+audio) ----
+    def _extract_bili_info(self, url):
+        """Parse Bilibili URL, extract video metadata and stream formats."""
+        resolved = _resolve_bili_url(url)
+        if not resolved:
+            return {"ok": False, "error": "无法识别B站链接格式", "type": "bilibili"}
+        mode, id_ = resolved
+        if mode == 'video':
+            return _extract_bili_video(id_)
+        elif mode == 'bangumi':
+            return _extract_bili_bangumi(id_)
+        elif mode == 'season':
+            # For season URLs, we'd need more logic; return basic error
+            return {"ok": False, "error": "番剧系列链接请使用具体剧集链接（ep开头）", "type": "bilibili"}
+        return {"ok": False, "error": "无法识别B站链接", "type": "bilibili"}
+
+    def _download_bili_thread(self, gid, video_url, audio_url, title, video_backup_urls=None, audio_backup_urls=None):
+        """Download Bilibili DASH streams (video + audio) and merge with ffmpeg."""
+        safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '视频'
+        # Use unique output path
+        output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
+        counter = 1
+        while os.path.exists(output_path):
+            output_path = os.path.join(self.save_path, f"{safe_title}_{counter}.mp4")
+            counter += 1
+
+        # Create temp files for video and audio streams
+        video_tmp = output_path + '.video.tmp.mp4'
+        audio_tmp = output_path + '.audio.tmp.m4a'
+
+        info = {
+            'url': '', 'title': title, 'state': 'downloading',
+            'progress': 0, 'size': 0, 'download_rate': 0,
+            'output': output_path,
+            'added_at': time.time(),
+        }
+        self.bili_tasks[gid] = info
+
+        headers_args = [
+            '-user_agent', BILI_HEADERS['User-Agent'],
+            '-referer', BILI_HEADERS['Referer'],
+        ]
+
+        # Try primary URL, fallback to backup URLs if primary fails
+        v_url = video_url
+        a_url = audio_url
+
+        def _try_url_with_fallback(primary, backups, label):
+            """Try primary URL; if ffmpeg fails, try backup URLs."""
+            urls = [primary] + (backups or [])
+            for url in urls:
+                if not url:
+                    continue
+                return url
+            return None
+
+        v_url = _try_url_with_fallback(v_url, video_backup_urls, 'video')
+        a_url = _try_url_with_fallback(a_url, audio_backup_urls, 'audio')
+
+        if not v_url and not a_url:
+            self.bili_tasks[gid]['state'] = 'error'
+            self.bili_tasks[gid]['error'] = '无可用视频/音频流'
+            return
+
+        # Build ffmpeg command:
+        # If both video and audio → download both separately, then merge
+        # If only audio → download audio only
+        if v_url and a_url:
+            # Merge: download video → tmp, download audio → tmp, concat with ffmpeg
+            # Use ffmpeg to download both streams simultaneously via two inputs + merge
+            cmd = [
+                'ffmpeg', '-y',
+                *headers_args,
+                '-i', v_url,
+                *headers_args,
+                '-i', a_url,
+                '-c:v', 'copy', '-c:a', 'copy',
+                '-movflags', '+faststart',
+                '-progress', 'pipe:1', '-nostats', '-loglevel', 'error',
+                output_path,
+            ]
+        elif v_url:
+            # Video only (no audio stream available)
+            cmd = [
+                'ffmpeg', '-y',
+                *headers_args,
+                '-i', v_url,
+                '-c', 'copy',
+                '-movflags', '+faststart',
+                '-progress', 'pipe:1', '-nostats', '-loglevel', 'error',
+                output_path,
+            ]
+        elif a_url:
+            # Audio only → save as m4a
+            output_path = output_path.replace('.mp4', '.m4a')
+            self.bili_tasks[gid]['output'] = output_path
+            cmd = [
+                'ffmpeg', '-y',
+                *headers_args,
+                '-i', a_url,
+                '-c:a', 'copy',
+                '-movflags', '+faststart',
+                '-progress', 'pipe:1', '-nostats', '-loglevel', 'error',
+                output_path,
+            ]
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, bufsize=1)
+            self.bili_tasks[gid]['proc'] = proc
+            # Get total duration from the Bilibili API data (already known)
+            bili_duration = self.bili_tasks[gid].get('duration', 0) or 0
+
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith('out_time='):
+                    time_str = line.split('=')[1]
+                    parts = time_str.split(':')
+                    try:
+                        seconds = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                        if bili_duration > 0:
+                            self.bili_tasks[gid]['progress'] = min(round(100 * seconds / bili_duration, 1), 99.9)
+                    except (ValueError, IndexError):
+                        pass
+                elif line.startswith('total_size='):
+                    try:
+                        size = int(line.split('=')[1])
+                        self.bili_tasks[gid]['size'] = size
+                        now = time.time()
+                        last_size = self.bili_tasks[gid].get('_last_size', 0)
+                        last_time = self.bili_tasks[gid].get('_last_time', now)
+                        if now > last_time and size > last_size:
+                            instant = (size - last_size) / (now - last_time)
+                            prev = self.bili_tasks[gid].get('_smooth_rate', 0)
+                            alpha = 0.3 if prev > 0 else 0.8
+                            self.bili_tasks[gid]['_smooth_rate'] = alpha * instant + (1 - alpha) * prev
+                            self.bili_tasks[gid]['download_rate'] = int(self.bili_tasks[gid]['_smooth_rate'])
+                        self.bili_tasks[gid]['_last_size'] = size
+                        self.bili_tasks[gid]['_last_time'] = now
+                    except (ValueError, KeyError):
+                        pass
+
+            proc.wait()
+
+            if gid in self.bili_tasks and self.bili_tasks[gid].get('state') == 'paused':
+                return
+
+            if proc.returncode == 0:
+                self.bili_tasks[gid]['state'] = 'finished'
+                self.bili_tasks[gid]['progress'] = 100
+                if os.path.exists(output_path):
+                    self.bili_tasks[gid]['size'] = os.path.getsize(output_path)
+            else:
+                # ffmpeg failed — try backup URLs if available
+                stderr = proc.stderr.read() if proc.stderr else ''
+                self.bili_tasks[gid]['state'] = 'error'
+                self.bili_tasks[gid]['error'] = f"下载失败：{stderr[:200]}"
+                # Clean up partial file
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.bili_tasks[gid]['state'] = 'error'
+            self.bili_tasks[gid]['error'] = str(e)
+
+    def start_bili_download(self, bvid, cid, quality_id, codec_id, audio_id, title, aid=None):
+        """Start a Bilibili DASH download. Returns gid."""
+        gid = f"bili_{self._bili_counter}"
+        self._bili_counter += 1
+
+        # Re-extract stream URLs for the selected quality
+        cookies = _get_bili_cookie()
+        headers = {**BILI_HEADERS}
+        if cookies:
+            headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+
+        # Get stream URLs
+        playurl = f'https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=120&fnval=16&fourk=1'
+        r = requests.get(playurl, headers=headers, timeout=10)
+        stream_data = r.json()
+        if stream_data.get('code') != 0:
+            return {"ok": False, "error": f"获取视频流失败：{stream_data.get('message')}"}
+
+        dash = stream_data['data'].get('dash', {}) or {}
+        video_streams = dash.get('video', []) or []
+        audio_streams = dash.get('audio', []) or []
+
+        # Find the selected video stream
+        selected_video = None
+        for v in video_streams:
+            if v.get('id') == quality_id and v.get('codecid') == codec_id:
+                selected_video = v
+                break
+        # Fallback: any stream with the same quality_id
+        if not selected_video:
+            for v in video_streams:
+                if v.get('id') == quality_id:
+                    selected_video = v
+                    break
+        # Fallback: prefer H264 at any quality
+        if not selected_video and video_streams:
+            for v in video_streams:
+                if v.get('codecid') == 7:  # H264
+                    selected_video = v
+                    break
+            if not selected_video:
+                selected_video = video_streams[0]
+
+        # Find the selected audio stream (best quality preferred)
+        selected_audio = None
+        if audio_id:
+            for a in audio_streams:
+                if a.get('id') == audio_id:
+                    selected_audio = a
+                    break
+        if not selected_audio and audio_streams:
+            # Default: highest quality audio
+            selected_audio = max(audio_streams, key=lambda a: a.get('bandwidth', 0))
+
+        video_url = selected_video.get('baseUrl', '') if selected_video else ''
+        video_backup_urls = selected_video.get('backupUrl', []) if selected_video else []
+        audio_url = selected_audio.get('baseUrl', '') if selected_audio else ''
+        audio_backup_urls = selected_audio.get('backupUrl', []) if selected_audio else []
+
+        self.bili_tasks[gid] = {
+            'url': f'https://www.bilibili.com/video/{bvid}',
+            'title': title, 'state': 'downloading',
+            'progress': 0, 'size': 0, 'download_rate': 0,
+            'output': '', 'duration': 0,
+            '_last_size': 0, '_last_time': time.time(), '_smooth_rate': 0,
+            'added_at': time.time(),
+        }
+
+        # Get duration from video info API
+        info_url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
+        try:
+            r_info = requests.get(info_url, headers=headers, timeout=10)
+            info_data = r_info.json().get('data', {})
+            self.bili_tasks[gid]['duration'] = info_data.get('duration', 0) or 0
+        except Exception:
+            pass
+
+        t = threading.Thread(target=self._download_bili_thread,
+                             args=(gid, video_url, audio_url, title,
+                                   video_backup_urls, audio_backup_urls),
+                             daemon=True)
+        t.start()
+        return {"ok": True, "gid": gid, "type": "bilibili"}
+
+    def stop_bili_download(self, gid, skip_trash=False):
+        """Stop a Bilibili download."""
+        if gid in self.bili_tasks:
+            info = self.bili_tasks[gid]
+            proc = info.get('proc')
+            if proc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            info['state'] = 'removed'
+            if not skip_trash:
+                output = info.get('output', '')
+                self.records["trash"].insert(0, {
+                    "gid": gid, "type": "bilibili", "name": info.get('title', 'B站视频'),
+                    "url": info.get('url', ''), "dir": self.save_path,
+                    "paths": [output] if output and os.path.exists(output) else [],
+                    "size": info.get('size', 0), "completed_at": int(time.time()),
+                })
+                self._save_records()
+            else:
+                output = info.get('output', '')
+                if output and os.path.exists(output):
+                    try:
+                        os.remove(output)
+                    except Exception:
+                        pass
+            del self.bili_tasks[gid]
+            return True
+        return False
+
     # ---- ed2k → magnet conversion ----
     def _convert_ed2k(self, url):
         """Convert an ed2k link to a magnet/torrent download by searching
@@ -2005,6 +2610,8 @@ def api_pause():
         return jsonify(ok=engine.pause_m3u8_download(gid))
     if gid and gid.startswith("yt_"):
         return jsonify(ok=False, error="yt-dlp 下载不支持暂停")
+    if gid and gid.startswith("bili_"):
+        return jsonify(ok=False, error="B站视频下载不支持暂停")
     return jsonify(ok=engine.pause(data.get("gid")))
 
 
@@ -2037,6 +2644,8 @@ def api_stop():
         engine.stop_m3u8_download(gid, skip_trash=skip_trash)
     elif gid and gid.startswith("yt_"):
         engine.stop_yt_download(gid, skip_trash=skip_trash)
+    elif gid and gid.startswith("bili_"):
+        engine.stop_bili_download(gid, skip_trash=skip_trash)
     else:
         engine.stop(gid, skip_trash=skip_trash)
     return jsonify(ok=True)
@@ -2136,6 +2745,66 @@ def api_yt_info():
         return jsonify(ok=False, error="请输入视频链接"), 400
     result = engine._extract_yt_info(url)
     return jsonify(result)
+
+
+@app.route("/api/bili_info", methods=["POST"])
+def api_bili_info():
+    """提取B站视频信息（画质列表+分P），不自动下载。"""
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    page = data.get("page", 1)
+    if not url:
+        return jsonify(ok=False, error="请输入B站视频链接"), 400
+    resolved = _resolve_bili_url(url)
+    if not resolved:
+        return jsonify(ok=False, error="无法识别B站链接格式")
+    mode, id_ = resolved
+    if mode == 'video':
+        result = _extract_bili_video(id_, page=page)
+    elif mode == 'bangumi':
+        result = _extract_bili_bangumi(id_)
+    else:
+        result = {"ok": False, "error": "暂不支持该链接类型"}
+    return jsonify(result)
+
+
+@app.route("/api/download_bili", methods=["POST"])
+def api_download_bili():
+    """启动B站视频下载（DASH流+ffmpeg合并）。"""
+    data = request.get_json(force=True)
+    bvid = data.get("bvid", "").strip()
+    cid = data.get("cid", 0)
+    aid = data.get("aid", 0)
+    title = data.get("title", "").strip()
+    quality_id = data.get("quality_id", 32)  # default 480P
+    codec_id = data.get("codec_id", 7)  # default H264
+    audio_id = data.get("audio_id", 0)  # 0 = auto best
+    if not bvid:
+        return jsonify(ok=False, error="缺少B站视频BV号"), 400
+    result = engine.start_bili_download(bvid, cid, quality_id, codec_id, audio_id,
+                                        title=title or "B站视频", aid=aid)
+    return jsonify(result)
+
+
+@app.route("/api/bili_cookie", methods=["POST"])
+def api_bili_cookie():
+    """保存B站 SESSDATA cookie（用于获取1080P+画质）。"""
+    data = request.get_json(force=True)
+    sessdata = data.get("SESSDATA", "").strip()
+    if not sessdata:
+        # Delete the cookie file
+        if os.path.exists(_BILI_COOKIE_FILE):
+            try:
+                os.remove(_BILI_COOKIE_FILE)
+            except Exception:
+                pass
+        return jsonify(ok=True, message="已删除Cookie")
+    # Save to file
+    try:
+        json.dump({"SESSDATA": sessdata}, open(_BILI_COOKIE_FILE, "w"))
+        return jsonify(ok=True, message="Cookie已保存，下次解析B站视频将使用登录身份获取1080P+画质")
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
 
 
 
