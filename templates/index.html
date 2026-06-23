@@ -1146,7 +1146,7 @@ async function pollBiliQr(){
       $('biliQrStatus').style.color='var(--accent2)';
       $('biliQrImage').style.display='none';
       // Auto-close after 1.5 seconds
-      setTimeout(()=>{
+      setTimeout(async ()=>{
         $('biliQrOverlay').style.display='none';
         checkBiliLogin();
         // Re-parse current video if showing
