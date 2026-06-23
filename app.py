@@ -497,8 +497,10 @@ def extract_video(url):
         if yt_result and yt_result.get("ok"):
             return yt_result
 
-        return {"ok": False, "error": "未解析出可下载内容",
-                "hint": _detect_login_required(html)}
+        hint = _detect_login_required(html)
+        if hint:
+            hint += '\n提示：如果你在浏览器中已登录该网站，再次粘贴同一链接，工具会自动从浏览器读取登录Cookie来提取视频。'
+        return {"ok": False, "error": "未解析出可下载内容", "hint": hint}
 
     except requests.RequestException as e:
         return {"ok": False, "error": "未解析出可下载内容"}
