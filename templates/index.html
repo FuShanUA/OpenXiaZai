@@ -43,6 +43,7 @@ input[type=text]:focus{border-color:var(--accent)}
 .badge.unsup{color:var(--warn)}
 .badge.m3u8{color:#c9a3ff}
 .badge.direct{color:#c9a3ff}
+.badge.yt_media{color:#ff5c5c}
 /* tabs */
 .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
 .tab{padding:8px 16px;cursor:pointer;color:var(--muted);font-size:13px;font-weight:500;
@@ -147,7 +148,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 <div class="wrap">
   <header>
     <div class="logo">⬇</div>
-    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件</div></div>
+    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X/Twitter</div></div>
     <div style="flex:1"></div>
     <button class="btn sm" id="settingsBtn" title="设置" style="font-size:22px;padding:4px 8px">⚙</button>
   </header>
@@ -155,7 +156,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   <div class="card">
     <div class="row">
       <div style="position:relative;flex:1">
-        <input type="text" id="url" placeholder="粘贴链接或种子文件路径：magnet:、http(s)://、ftp://、ed2k://、/path/file.torrent…" style="flex:1;padding-right:28px">
+        <input type="text" id="url" placeholder="粘贴链接或种子文件路径：magnet:、http(s)://、ftp://、ed2k://、YouTube、X/Twitter、/path/file.torrent…" style="flex:1;padding-right:28px">
         <button id="clearUrlBtn" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px 6px;display:none;line-height:1" title="清空">✕</button>
       </div>
       <button class="btn sm" id="menuBtn" title="更多操作">⋮</button>
@@ -178,6 +179,27 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       <button class="btn go" id="cxDownload">立即下载</button>
       <button class="btn" id="cxQueue">加入队列</button>
       <button class="btn" id="cxCancel">取消</button>
+    </div>
+  </div>
+
+  <!-- YouTube/X 视频预览卡片 -->
+  <div class="card" id="ytPreview" style="display:none">
+    <div class="row" style="align-items:flex-start">
+      <img id="ytPoster" style="width:160px;height:90px;object-fit:cover;border-radius:8px;flex-shrink:0;background:var(--panel2)" alt="">
+      <div style="flex:1;min-width:0;padding-left:8px">
+        <div id="ytTitle" style="font-weight:600;font-size:15px;margin-bottom:4px"></div>
+        <div id="ytMeta" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+        <div id="ytDesc" style="font-size:12px;color:var(--muted);max-height:40px;overflow:hidden;text-overflow:ellipsis"></div>
+      </div>
+    </div>
+    <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">选择画质：</div>
+      <div id="ytFormats" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px"></div>
+    </div>
+    <div class="row" style="margin-top:10px;gap:8px">
+      <button class="btn go" id="ytDownload">立即下载</button>
+      <button class="btn" id="ytAudioOnly">仅下载音频</button>
+      <button class="btn" id="ytCancel">取消</button>
     </div>
   </div>
 
@@ -256,7 +278,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链"};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube/X 视频"};
 const UNSUP={quark:1,cloud:1,thunder:1};
 let activeTab='tasks';
 let cur=null;
@@ -315,9 +337,11 @@ $('url').addEventListener('input',()=>{
   else if(v.startsWith('thunder'))t='thunder';
   else if(/\.m3u8($|\?)/.test(v))t='m3u8';
   else if(/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v))t='direct';
+  else if(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(v))t='yt_media';
+  else if(/https?:\/\/(www\.)?(x\.com|twitter\.com|t\.co)\//.test(v))t='yt_media';
   else if(v.startsWith('http'))t='http';
   h.style.display='block';
-  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'');
+  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(t==='yt_media'?' · 将使用 yt-dlp 下载':'');
 });
 
 // 判断 URL 是否为直接文件下载（不走视频提取）
@@ -382,6 +406,22 @@ $('addBtn').onclick=async()=>{
     }catch(e){
       await customAlert('添加失败: '+e.message);
     }
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
+  // YouTube/X 视频链接：使用 yt-dlp 提取格式列表
+  if(/https?:\/\/(www\.)?(youtube\.com|youtu\.be|x\.com|twitter\.com|t\.co)\//.test(v)){
+    $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
+    try{
+      const res=await post('/api/yt_info',{url});
+      if(!res||res.ok===false){
+        await customAlert(res?.error||'获取视频信息失败');
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      showYtPreview(res);
+    }catch(e){await customAlert('获取视频信息失败: '+e.message)}
     $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
     return;
   }
@@ -536,6 +576,7 @@ document.addEventListener('keydown',e=>{
   const d=$('dropMenu');if(d.style.display==='block')d.style.display='none';
   if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
   if($('cxPreview').style.display==='block'){hideCxPreview();return}
+  if($('ytPreview').style.display==='block'){hideYtPreview();return}
   const gids=Object.keys(modalStates);
   if(gids.length>0){cancelModal(gids[gids.length-1],true)}
 });
@@ -554,6 +595,7 @@ document.addEventListener('keydown',e=>{
     if(!t||!LINK_RE.test(t))return;
     if(Object.keys(modalStates).length>0)return;
     if($('cxPreview').style.display==='block')return;
+  if($('ytPreview').style.display==='block')return;
     if($('confirmOverlay').style.display==='flex')return;
     if(document.activeElement===$('url')&&$('url').value===t)return;
     if(t===lastText)return;
@@ -646,6 +688,103 @@ async function doCxAdd(action){
 $('cxDownload').onclick=async()=>{await doCxAdd('download')};
 $('cxQueue').onclick=async()=>{await doCxAdd('queue')};
 $('cxCancel').onclick=hideCxPreview;
+
+// ---- YouTube/X 视频预览卡片 ----
+let ytData=null;
+let ytSelectedFormat=null;
+function showYtPreview(data){
+  ytData=data;
+  ytSelectedFormat=null;
+  const platformTag='<span class="badge yt_media" style="margin-left:6px">'+esc(data.platform||'YouTube/X')+'</span>';
+  $('ytTitle').innerHTML=esc(data.title||'未知视频')+platformTag;
+  // Meta line: uploader + duration
+  let meta='';
+  if(data.uploader)meta+=esc(data.uploader);
+  if(data.duration){
+    const d=data.duration;
+    if(d>=3600){meta+=' · '+Math.floor(d/3600)+'时'+Math.floor((d%3600)/60)+'分'+Math.round(d%60)+'秒'}
+    else if(d>=60){meta+=' · '+Math.floor(d/60)+'分'+Math.round(d%60)+'秒'}
+    else{meta+=' · '+d+'秒'}
+  }
+  $('ytMeta').textContent=meta;
+  $('ytDesc').textContent=data.description||'';
+  if(data.poster){$('ytPoster').src=data.poster;$('ytPoster').style.display=''}
+  else{$('ytPoster').style.display='none'}
+  // Build format buttons
+  const fmts=data.formats||[];
+  const fmtEl=$('ytFormats');
+  fmtEl.innerHTML='';
+  // Separate into video+audio, video-only, audio-only groups
+  const vaFormats=fmts.filter(f=>f.is_video_audio);
+  const vFormats=fmts.filter(f=>f.is_video_only);
+  const aFormats=fmts.filter(f=>f.is_audio_only);
+  // Add video+audio formats first (preferred)
+  if(vaFormats.length){
+    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--muted);margin-right:2px">视频+音频：</span>';
+    vaFormats.forEach(f=>{
+      const b=document.createElement('button');
+      b.className='btn sm';
+      b.textContent=f.label+(f.ext?' · '+f.ext:'')+(f.tbr?' · '+Math.round(f.tbr)+'kbps':'');
+      b.dataset.fid=f.format_id;
+      b.onclick=()=>{selectYtFormat(f.format_id,f.is_audio_only);fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));b.classList.add('primary')};
+      fmtEl.appendChild(b);
+    });
+  }
+  // Add video-only formats
+  if(vFormats.length){
+    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--muted);margin-left:6px;margin-right:2px">仅视频：</span>';
+    vFormats.slice(0,8).forEach(f=>{
+      const b=document.createElement('button');
+      b.className='btn sm';
+      b.textContent=f.label+(f.ext?' · '+f.ext:'');
+      b.dataset.fid=f.format_id;
+      b.onclick=()=>{selectYtFormat(f.format_id,f.is_audio_only);fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));b.classList.add('primary')};
+      fmtEl.appendChild(b);
+    });
+  }
+  // Add audio-only formats
+  if(aFormats.length){
+    fmtEl.innerHTML+='<span style="font-size:11px;color:var(--muted);margin-left:6px;margin-right:2px">仅音频：</span>';
+    aFormats.forEach(f=>{
+      const b=document.createElement('button');
+      b.className='btn sm';
+      b.textContent=f.label+(f.ext?' · '+f.ext:'');
+      b.dataset.fid=f.format_id;
+      b.onclick=()=>{selectYtFormat(f.format_id,f.is_audio_only);fmtEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));b.classList.add('primary')};
+      fmtEl.appendChild(b);
+    });
+  }
+  // Auto-select best combined format
+  if(vaFormats.length){
+    const best=vaFormats[0];
+    ytSelectedFormat=best.format_id;
+    const bestBtn=fmtEl.querySelector('[data-fid="'+best.format_id+'"]');
+    if(bestBtn)bestBtn.classList.add('primary');
+  }else if(fmts.length){
+    const best=fmts[0];
+    ytSelectedFormat=best.format_id;
+    const bestBtn=fmtEl.querySelector('[data-fid="'+best.format_id+'"]');
+    if(bestBtn)bestBtn.classList.add('primary');
+  }
+  $('ytPreview').style.display='block';
+  $('url').value='';$('typeHint').style.display='none';
+}
+function selectYtFormat(format_id,is_audio_only){
+  ytSelectedFormat=format_id;
+  ytData._selected_audio_only=is_audio_only;
+}
+function hideYtPreview(){ytData=null;ytSelectedFormat=null;$('ytPreview').style.display='none';$('url').value=''}
+async function doYtDownload(audioOnly){
+  if(!ytData)return;
+  const formatId=audioOnly?null:ytSelectedFormat;
+  const res=await post('/api/download_yt',{url:ytData.url,title:ytData.title,format_id:formatId,is_audio_only:audioOnly});
+  if(res&&res.ok){hideYtPreview();switchTab('tasks')}
+  else{await customAlert(res?.error||'下载失败');return false}
+  return true;
+}
+$('ytDownload').onclick=async()=>{await doYtDownload(false)};
+$('ytAudioOnly').onclick=async()=>{await doYtDownload(true)};
+$('ytCancel').onclick=hideYtPreview;
 
 // ---- file selection modal (multi, draggable, stackable) ----
 const modalStates={};  // gid -> {overlay, timer, startTime}

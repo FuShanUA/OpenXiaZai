@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体
+- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体、YouTube/X 视频 (yt-dlp)
 - **种子文件选择**：添加磁力/种子后弹出文件选择窗口，可勾选需要下载的文件，支持按类型筛选（视频/音乐/图片/文档）
 - **多任务并行**：支持同时下载最多 3 个任务，每个任务 16 线程
 - **DHT 加速**：内置 DHT 启动节点、持久化路由表、扩展 Tracker 列表，加速磁力链接解析
@@ -22,7 +22,7 @@ brew install aria2
 brew install amule   # 可选：ed2k 电驴下载支持
 
 # Python 依赖
-pip install flask pywebview requests
+pip install flask pywebview requests yt-dlp yt-dlp
 ```
 
 ### 克隆
@@ -32,7 +32,7 @@ git clone https://github.com/FuShanUA/OpenXiaZai.git
 cd OpenXiaZai
 python -m venv venv
 source venv/bin/activate
-pip install flask pywebview requests
+pip install flask pywebview requests yt-dlp
 ```
 
 ## 使用
@@ -66,6 +66,7 @@ venv/bin/python app.py
 
 | 组件 | 用途 |
 |------|------|
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | YouTube/X 视频下载引擎 |
 | [aria2](https://github.com/aria2/aria2) | 下载引擎，支持多协议、多线程、DHT |
 | [aMule](https://github.com/amule-project/amule) | ed2k/eDonkey 下载引擎（可选） |
 | [Flask](https://flask.palletsprojects.com/) | Web 后端，提供 REST API |

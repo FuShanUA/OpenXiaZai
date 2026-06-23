@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import shutil
@@ -9,6 +10,15 @@ import hashlib
 import threading
 import requests
 from flask import Flask, request, jsonify, render_template
+
+# Ensure yt_dlp can be found: check common locations
+_venv_ytdlp = os.path.join(os.path.expanduser("~"), "cc", ".venv", "lib")
+if os.path.isdir(_venv_ytdlp):
+    # Find the actual site-packages dir (version-dependent)
+    for _sub in os.listdir(_venv_ytdlp):
+        _sp = os.path.join(_venv_ytdlp, _sub, "site-packages")
+        if os.path.isdir(_sp) and _sp not in sys.path:
+            sys.path.insert(0, _sp)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SAVE = os.path.expanduser("~/Downloads/OpenXiaZai")
@@ -33,6 +43,11 @@ def classify(url):
         path_part = u.split("?")[0].split("#")[0]
         if path_part.endswith(".torrent"):
             return "torrent_url"
+        # YouTube / X (Twitter) — dedicated yt-dlp handler
+        if re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', u):
+            return "yt_media"
+        if re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', u):
+            return "yt_media"
         if "pan.quark.cn" in u or "quark.cn" in u:
             return "quark"
         if any(h in u for h in ("pan.baidu.com", "115.com", "aliyundrive", "alipan.com")):
@@ -292,6 +307,7 @@ TYPES = {
     "http": "HTTP 直链",
     "ftp": "FTP",
     "ed2k": "电驴→种子搜索",
+    "yt_media": "YouTube/X 视频",
     "quark": "夸克网盘",
     "cloud": "网盘链接",
     "thunder": "迅雷链接",
@@ -429,15 +445,13 @@ def parse_ed2k_url(url):
 def search_magnet_for_ed2k(file_name, file_size):
     """Search for a magnet/torrent link for the same file as an ed2k link.
 
-    Strategy: use DuckDuckGo HTML search to find torrent pages containing
-    magnet links for the file, then extract magnet links from those pages.
-    DDG works without Cloudflare JS challenge, unlike most torrent indexes.
+    Primary strategy: use FlareSolverr (local Docker service on port 8191)
+    to bypass Cloudflare, search 1337x for torrent detail pages, then visit
+    the detail page to extract the magnet link.
+
+    Fallback: direct HTTP requests (likely blocked by Cloudflare).
     """
     import urllib.parse
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-    }
 
     # Clean up file name for search
     search_name = re.sub(r'\.\w{1,4}$', '', file_name)
@@ -445,144 +459,158 @@ def search_magnet_for_ed2k(file_name, file_size):
     if len(search_query) > 60:
         search_query = search_query[:60]
 
-    # Step 1: Search DuckDuckGo for torrent/magnet pages
-    ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_query)}+magnet+torrent"
-    try:
-        r = requests.get(ddg_url, headers=headers, timeout=12, allow_redirects=True)
-        if r.status_code == 200:
-            html = r.text
-            # Extract result URLs from DDG
-            # DDG format: <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=ENCODED_URL">
-            result_urls = re.findall(
-                r'uddg=(https?://[^&"\']+)', html
+    search_lower = search_query.lower()
+
+    # ---- Strategy 1: FlareSolverr (bypasses Cloudflare with real Chrome) ----
+    flaresolverr_url = "http://localhost:8191/v1"
+
+    def _fs_get(url, max_timeout=30000):
+        """Send a request through FlareSolverr."""
+        try:
+            r = requests.post(flaresolverr_url, json={
+                "cmd": "request.get",
+                "url": url,
+                "maxTimeout": max_timeout,
+            }, timeout=max_timeout / 1000 + 10)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("status") == "ok":
+                    return data.get("solution", {}).get("response", "")
+            return None
+        except Exception:
+            return None
+
+    # 1a: Search 1337x for torrent detail page links
+    search_url = f"https://1337x.to/search/{urllib.parse.quote_plus(search_query)}/1/"
+    search_html = _fs_get(search_url, max_timeout=60000)
+
+    if search_html:
+        # 1337x search results contain links to detail pages like /torrent/ID/SLUG/
+        detail_links = re.findall(r'href="/torrent/(\d+)/([^"/]+)/"', search_html)
+
+        # Also extract display names from search result rows
+        # 1337x uses class="coll-5 name" in table rows
+        row_data = re.findall(
+            r'href="/torrent/\d+/([^"/]+)/"[^>]*>\s*([^<]+)',
+            search_html
+        )
+
+        # Visit each detail page (limit 3) to find magnet link
+        for idx, (torrent_id, slug) in enumerate(detail_links[:3]):
+            detail_url = f"https://1337x.to/torrent/{torrent_id}/{slug}/"
+            detail_html = _fs_get(detail_url, max_timeout=60000)
+
+            if not detail_html:
+                continue
+
+            # Extract magnet links from detail page
+            # 1337x uses &amp; for & in HTML, need to handle that
+            magnets = re.findall(
+                r'magnet:\?xt=urn:btih:[a-fA-F0-9]{40}(?:&amp;[^"<\s]*|[^"<\s]*)',
+                detail_html
             )
-            # Decode URLs
-            result_urls = [urllib.parse.unquote(u) for u in result_urls]
+            # Clean up &amp; → &
+            magnets = [m.replace('&amp;', '&') for m in magnets]
 
-            # Skip non-torrent pages (news, blogs, etc.)
-            torrent_domains = ('1337x', 'thepiratebay', 'torrentgalaxy', 'rarbg',
-                              'yts', 'nyaa', 'torlock', 'magnetdl', 'limetorrents',
-                              'torrentdownload', 'yourbittorrent', 'bt4g', 'ibit',
-                              'torrentfunk', 'snowfl', 'piratebay', 'torrentz2')
+            if not magnets:
+                continue
 
-            # Visit each result page and look for magnet links
-            # Limit to top 5 results to avoid excessive requests
-            for result_url in result_urls[:5]:
-                # Skip obviously irrelevant pages
-                url_lower = result_url.lower()
-                if not any(d in url_lower for d in torrent_domains):
-                    # Also try non-domain pages — many generic pages embed magnet links too
-                    # But skip known non-torrent sites
-                    skip = ('wikipedia', 'github', 'stackoverflow', 'reddit',
-                            'amazon', 'ebay', 'youtube', 'facebook', 'twitter')
-                    if any(s in url_lower for s in skip):
-                        continue
+            # Try name matching
+            for magnet in magnets:
+                dn_match = re.search(r'dn=([^&]+)', magnet)
+                magnet_name = ""
+                if dn_match:
+                    magnet_name = urllib.parse.unquote(dn_match.group(1))
 
-                try:
-                    page_r = requests.get(result_url, headers=headers, timeout=10, allow_redirects=True)
-                    if page_r.status_code != 200:
-                        continue
-                    page_html = page_r.text
-
-                    # Extract magnet links
-                    magnet_matches = re.findall(
-                        r'(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"<\s]*)',
-                        page_html
-                    )
-                    # Also try base32 info hashes
-                    if not magnet_matches:
-                        magnet_matches = re.findall(
-                            r'(magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"<\s]*)',
-                            page_html
-                        )
-
-                    if not magnet_matches:
-                        continue
-
-                    # Match by name
-                    search_lower = search_query.lower()
-                    for magnet in magnet_matches:
-                        dn_match = re.search(r'dn=([^&]+)', magnet)
-                        magnet_name = ""
-                        if dn_match:
-                            magnet_name = urllib.parse.unquote(dn_match.group(1))
-
-                        if magnet_name:
-                            clean_magnet = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
-                            clean_search = search_lower
-                            # Partial match: ed2k name should appear in torrent name
-                            # or vice versa (torrents often have extra tags)
-                            if (clean_search[:20] in clean_magnet or
-                                clean_magnet[:20] in clean_search or
-                                clean_search.split()[0] in clean_magnet.split()):
-                                return {
-                                    "ok": True,
-                                    "title": magnet_name,
-                                    "magnet": magnet,
-                                    "size": file_size,
-                                    "source": "torrent_search",
-                                }
-
-                    # Name match failed but magnets exist — return first one
-                    # if the page title contains our search query
-                    page_title = ""
-                    title_match = re.search(r'<title[^>]*>(.*?)</title>', page_html, re.IGNORECASE)
-                    if title_match:
-                        page_title = title_match.group(1).lower()
-                    if search_query[:15].lower() in page_title and magnet_matches:
-                        first_magnet = magnet_matches[0]
-                        dn_match = re.search(r'dn=([^&]+)', first_magnet)
-                        title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
+                if magnet_name:
+                    clean_m = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
+                    # Check if ed2k file name appears in torrent name
+                    keywords = search_lower.split()
+                    if any(k in clean_m for k in keywords[:3]) or search_lower[:15] in clean_m:
                         return {
                             "ok": True,
-                            "title": title,
-                            "magnet": first_magnet,
+                            "title": magnet_name,
+                            "magnet": magnet,
                             "size": file_size,
                             "source": "torrent_search",
                         }
 
-                except Exception:
-                    continue
-    except Exception:
-        pass
+            # Name match failed but magnets exist on a relevant page
+            page_title = re.search(r'<title[^>]*>(.*?)</title>', detail_html, re.IGNORECASE)
+            if page_title and search_lower[:15] in page_title.group(1).lower() and magnets:
+                first_magnet = magnets[0]
+                dn_match = re.search(r'dn=([^&]+)', first_magnet)
+                title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
+                return {
+                    "ok": True, "title": title,
+                    "magnet": first_magnet, "size": file_size,
+                    "source": "torrent_search",
+                }
 
-    # Step 2: Try direct torrent index sites as fallback (may be blocked by Cloudflare)
-    direct_sources = [
-        f"https://1337x.to/search/{urllib.parse.quote_plus(search_query)}/1/",
-        f"https://torrentgalaxy.to/torrents.php?search={urllib.parse.quote_plus(search_query)}&sort=seeders&order=desc",
-    ]
-    for search_url in direct_sources:
-        try:
-            r = requests.get(search_url, headers=headers, timeout=12, allow_redirects=True)
-            if r.status_code == 200:
-                html = r.text
-                magnet_matches = re.findall(
-                    r'(magnet:\?xt=urn:btih:[a-zA-Z2-7]{32,40}[^"<\s]*)', html
-                )
-                if magnet_matches:
-                    search_lower = search_query.lower()
+        # No detail page had magnets — try YTS for movies
+        yts_url = f"https://yts.mx/browse-movies/0/{urllib.parse.quote_plus(search_query)}/all/all/0/downloads"
+        yts_html = _fs_get(yts_url, max_timeout=60000)
+        if yts_html:
+            magnets = re.findall(
+                r'magnet:\?xt=urn:btih:[a-fA-F0-9]{40}(?:&amp;[^"<\s]*|[^"<\s]*)',
+                yts_html
+            )
+            magnets = [m.replace('&amp;', '&') for m in magnets]
+            for magnet in magnets:
+                dn_match = re.search(r'dn=([^&]+)', magnet)
+                magnet_name = urllib.parse.unquote(dn_match.group(1)) if dn_match else ""
+                clean_m = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
+                if any(k in clean_m for k in search_lower.split()[:3]):
+                    return {
+                        "ok": True, "title": magnet_name,
+                        "magnet": magnet, "size": file_size,
+                        "source": "torrent_search",
+                    }
+
+    # ---- Strategy 2: Direct requests (fallback, likely blocked by Cloudflare) ----
+    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
+
+    # DuckDuckGo search → visit result pages
+    ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_query)}+magnet+torrent"
+    try:
+        r = requests.get(ddg_url, headers=headers, timeout=12, allow_redirects=True)
+        if r.status_code == 200:
+            result_urls = re.findall(r'uddg=(https?://[^&"\']+)', r.text)
+            result_urls = [urllib.parse.unquote(u) for u in result_urls]
+            torrent_domains = ('1337x', 'thepiratebay', 'torrentgalaxy', 'yts',
+                              'nyaa', 'torlock', 'magnetdl', 'limetorrents', 'bt4g', 'ibit')
+            for result_url in result_urls[:5]:
+                url_lower = result_url.lower()
+                skip = ('wikipedia', 'github', 'stackoverflow', 'reddit',
+                        'amazon', 'youtube', 'facebook', 'twitter')
+                if any(s in url_lower for s in skip):
+                    continue
+                try:
+                    page_r = requests.get(result_url, headers=headers, timeout=10, allow_redirects=True)
+                    if page_r.status_code != 200:
+                        continue
+                    magnet_matches = re.findall(r'(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"<\s]*)', page_r.text)
+                    if not magnet_matches:
+                        magnet_matches = re.findall(r'(magnet:\?xt=urn:btih:[A-Z2-7]{32}[^"<\s]*)', page_r.text)
+                    if not magnet_matches:
+                        continue
                     for magnet in magnet_matches:
                         dn_match = re.search(r'dn=([^&]+)', magnet)
                         if dn_match:
                             magnet_name = urllib.parse.unquote(dn_match.group(1))
-                            clean_magnet = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
-                            if search_lower[:20] in clean_magnet:
-                                return {
-                                    "ok": True, "title": magnet_name,
-                                    "magnet": magnet, "size": file_size,
-                                    "source": "torrent_search",
-                                }
-                    if magnet_matches:
+                            clean_m = re.sub(r'[\.\-_]', ' ', magnet_name.lower())
+                            if any(k in clean_m for k in search_lower.split()[:3]):
+                                return {"ok": True, "title": magnet_name, "magnet": magnet, "size": file_size, "source": "torrent_search"}
+                    page_title = re.search(r'<title[^>]*>(.*?)</title>', page_r.text, re.IGNORECASE)
+                    if page_title and search_lower[:15] in page_title.group(1).lower() and magnet_matches:
                         first_magnet = magnet_matches[0]
                         dn_match = re.search(r'dn=([^&]+)', first_magnet)
                         title = urllib.parse.unquote(dn_match.group(1)) if dn_match else search_name
-                        return {
-                            "ok": True, "title": title,
-                            "magnet": first_magnet, "size": file_size,
-                            "source": "torrent_search",
-                        }
-        except Exception:
-            continue
+                        return {"ok": True, "title": title, "magnet": first_magnet, "size": file_size, "source": "torrent_search"}
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     return {"ok": False, "error": "在种子网络中未找到该文件的源。可能原因：\n1. 该文件仅在电驴(eDonkey)网络可用，种子网络无源\n2. 种子搜索网站暂时不可访问\n\n建议：复制文件名到浏览器搜索其他下载方式。"}
 
@@ -604,6 +632,8 @@ class Engine:
         self.records = self._load_records()
         self.m3u8_tasks = {}
         self._m3u8_counter = 0
+        self.yt_tasks = {}      # gid -> {url, title, state, progress, ...}
+        self._yt_counter = 0
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
@@ -716,6 +746,9 @@ class Engine:
         # ed2k links: search for matching magnet/torrent
         if t == "ed2k":
             return self._convert_ed2k(url)
+        # YouTube/X links: use yt-dlp to extract info for preview
+        if t == "yt_media":
+            return self._extract_yt_info(url)
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
@@ -1158,6 +1191,51 @@ class Engine:
                 "metadata_progress": 0,
                 "added_at": info.get('added_at', 0),
             })
+        # 合并 yt-dlp 下载任务
+        for gid, info in list(self.yt_tasks.items()):
+            if info.get('state') == 'removed':
+                continue
+            state = info.get('state', 'downloading')
+            output = info.get('output', '')
+            if state == 'finished':
+                if gid not in existing:
+                    existing.add(gid)
+                    self.records["history"].insert(0, {
+                        "gid": gid, "type": "yt_media", "name": info.get('title', '视频下载'),
+                        "url": info.get('url', ''), "dir": self.save_path,
+                        "paths": [output] if output else [],
+                        "size": info.get('size', 0), "completed_at": int(time.time()),
+                    })
+                del self.yt_tasks[gid]
+                continue
+            downloaded = info.get('_downloaded', 0)
+            total = info.get('size', 0)
+            pct = info.get('progress', 0)
+            if total > 0 and pct == 0 and downloaded > 0:
+                pct = round(100 * downloaded / total, 1)
+            items.append({
+                "gid": gid,
+                "type": "yt_media",
+                "name": info.get('title', '视频下载'),
+                "state": state,
+                "progress": pct,
+                "size": total,
+                "completed_size": downloaded,
+                "download_rate": info.get('download_rate', 0),
+                "upload_rate": 0,
+                "peers": 0,
+                "seeds": 0,
+                "dir": self.save_path,
+                "files": [],
+                "paths": [output] if output else [],
+                "url": info.get('url', ''),
+                "has_metadata": True,
+                "metadata_progress": 0,
+                "added_at": info.get('added_at', 0),
+                "format_id": info.get('format_id', ''),
+                "is_audio_only": info.get('_is_audio_only', False),
+                "platform": info.get('platform', ''),
+            })
         return {
             "settings": {
                 "max_active": self.max_active,
@@ -1245,6 +1323,9 @@ class Engine:
         # 停止所有 m3u8 下载（ffmpeg 无法暂停，只能终止）
         for gid in list(self.m3u8_tasks.keys()):
             self.stop_m3u8_download(gid)
+        # 停止所有 yt-dlp 下载
+        for gid in list(self.yt_tasks.keys()):
+            self.stop_yt_download(gid, skip_trash=True)
 
     def clear_all_history(self):
         """Move all history records to trash."""
@@ -1525,6 +1606,274 @@ class Engine:
             return True
         return False
 
+    # ---- YouTube/X video extraction & download (yt-dlp) ----
+    def _extract_yt_info(self, url):
+        """Use yt-dlp to extract video metadata (title, thumbnail, available formats).
+        Returns a preview card dict for the frontend."""
+        try:
+            import yt_dlp
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+                'skip_download': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+            if not info:
+                return {"ok": False, "error": "未获取到视频信息", "type": "yt_media"}
+
+            title = info.get('title', '') or '未知视频'
+            thumbnail = info.get('thumbnail', '') or ''
+            duration = info.get('duration', 0) or 0
+            uploader = info.get('uploader', '') or ''
+            description = (info.get('description', '') or '')[:200]
+
+            # Collect available formats for user selection
+            formats_raw = info.get('formats', []) or []
+            formats = []
+            seen_heights = set()
+            for f in formats_raw:
+                ftype = f.get('type', 'unknown')
+                # Skip storyboards, trailers, and purely audio-only formats without video
+                if ftype == 'storyboard' or f.get('acodec') == 'none' and f.get('vcodec') == 'none':
+                    continue
+                height = f.get('height') or 0
+                ext = f.get('ext', '') or ''
+                vcodec = f.get('vcodec', '') or ''
+                acodec = f.get('acodec', '') or ''
+                filesize = f.get('filesize') or f.get('filesize_approx') or 0
+                vbr = f.get('vbr') or 0
+                abr = f.get('abr') or 0
+                tbr = f.get('tbr') or 0
+                format_id = f.get('format_id', '') or ''
+                format_note = f.get('format_note', '') or ''
+
+                # Determine display category
+                is_video_audio = vcodec != 'none' and acodec != 'none'
+                is_video_only = vcodec != 'none' and (acodec == 'none' or not acodec)
+                is_audio_only = vcodec == 'none' and acodec != 'none'
+
+                # Deduplicate same-height video+audio combined formats (prefer best)
+                # and same-bitrate audio-only formats
+                dedup_key = None
+                if is_video_audio:
+                    dedup_key = ('va', height, ext)
+                elif is_video_only:
+                    dedup_key = ('v', height, ext)
+                elif is_audio_only:
+                    dedup_key = ('a', int(abr), ext)
+
+                if dedup_key and dedup_key in seen_heights:
+                    continue
+
+                # Only include meaningful formats
+                label = ''
+                if height:
+                    label = f'{height}p'
+                elif is_audio_only and abr:
+                    label = f'{int(abr)}kbps'
+                else:
+                    label = format_note or ext
+
+                # Quality score for sorting (higher = better)
+                quality = (height or 0) * 100 + (tbr or 0)
+
+                if is_video_audio or is_video_only or is_audio_only:
+                    if dedup_key:
+                        seen_heights.add(dedup_key)
+                    formats.append({
+                        'format_id': format_id,
+                        'label': label,
+                        'ext': ext,
+                        'height': height,
+                        'filesize': filesize,
+                        'tbr': int(tbr) if tbr else 0,
+                        'vcodec': vcodec,
+                        'acodec': acodec,
+                        'is_video_audio': is_video_audio,
+                        'is_video_only': is_video_only,
+                        'is_audio_only': is_audio_only,
+                        'quality': quality,
+                    })
+
+            # Sort: video+audio best first, then video-only, then audio-only
+            formats.sort(key=lambda f: (
+                0 if f['is_video_audio'] else (1 if f['is_video_only'] else 2),
+                -f['quality']
+            ))
+
+            # Limit to top 20 formats to keep UI manageable
+            formats = formats[:20]
+
+            # Determine if URL is YouTube or X
+            is_youtube = bool(re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', url.lower()))
+            is_x = bool(re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', url.lower()))
+            platform = 'YouTube' if is_youtube else ('X/Twitter' if is_x else '视频平台')
+
+            return {
+                "ok": True,
+                "type": "yt_media",
+                "title": title,
+                "poster": thumbnail,
+                "m3u8_url": "",
+                "magnet": "",
+                "duration": duration,
+                "uploader": uploader,
+                "description": description,
+                "platform": platform,
+                "formats": formats,
+                "url": url,
+                "yt_source": True,
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"获取视频信息失败：{str(e)}", "type": "yt_media"}
+
+    def _download_yt_thread(self, gid, url, format_id, title):
+        """Download YouTube/X video in background thread using yt-dlp."""
+        import yt_dlp
+
+        safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '视频'
+        output_template = os.path.join(self.save_path, f"{safe_title}.%(ext)s")
+
+        info = {
+            'url': url, 'title': title, 'state': 'downloading',
+            'progress': 0, 'size': 0, 'download_rate': 0,
+            'format_id': format_id, 'output': '',
+            'proc': None, '_last_size': 0, '_last_time': time.time(),
+            '_smooth_rate': 0, 'added_at': time.time(),
+        }
+        self.yt_tasks[gid] = info
+
+        def progress_hook(d):
+            if gid not in self.yt_tasks:
+                return
+            task = self.yt_tasks[gid]
+            if d['status'] == 'downloading':
+                downloaded = d.get('downloaded_bytes', 0) or 0
+                total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0) or 0
+                speed = d.get('speed', 0) or 0
+                task['size'] = total
+                task['_downloaded'] = downloaded
+                task['download_rate'] = int(speed) if speed else 0
+                if total > 0:
+                    task['progress'] = round(100 * downloaded / total, 1)
+                # ETA
+                eta = d.get('eta', 0) or 0
+                task['_eta'] = eta
+            elif d['status'] == 'finished':
+                task['progress'] = 99.9
+                task['_downloaded'] = task.get('size', 0)
+                filename = d.get('filename', '') or ''
+                task['output'] = filename
+            elif d['status'] == 'error':
+                task['state'] = 'error'
+                task['error'] = d.get('message', '下载出错')
+
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'progress_hooks': [progress_hook],
+            'outtmpl': output_template,
+            'overwrites': True,
+        }
+
+        # Format selection
+        if format_id:
+            # Check if format is video+audio combined or needs merging
+            # For combined formats: download single stream
+            # For video-only: merge with best audio via yt-dlp's default behavior
+            ydl_opts['format'] = format_id + '+bestaudio/bestaudio/' + format_id
+        else:
+            # Default: best quality video+audio
+            ydl_opts['format'] = 'bestvideo+bestaudio/best'
+
+        # Merge into mp4 for video, keep original ext for audio-only
+        task_info = self.yt_tasks.get(gid, {})
+        if task_info.get('_is_audio_only'):
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+            }]
+        else:
+            ydl_opts['merge_output_format'] = 'mp4'
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }]
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            if gid in self.yt_tasks:
+                task = self.yt_tasks[gid]
+                if task.get('state') != 'error':
+                    task['state'] = 'finished'
+                    task['progress'] = 100
+                    # Find actual output file
+                    if not task.get('output') or not os.path.exists(task['output']):
+                        # yt-dlp may change extension after post-processing
+                        for ext in ('.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.opus'):
+                            candidate = os.path.join(self.save_path, f"{safe_title}{ext}")
+                            if os.path.exists(candidate):
+                                task['output'] = candidate
+                                task['size'] = os.path.getsize(candidate)
+                                break
+                    else:
+                        if os.path.exists(task['output']):
+                            task['size'] = os.path.getsize(task['output'])
+        except Exception as e:
+            if gid in self.yt_tasks:
+                self.yt_tasks[gid]['state'] = 'error'
+                self.yt_tasks[gid]['error'] = str(e)
+
+    def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False):
+        """Start a YouTube/X video download. Returns gid."""
+        gid = f"yt_{self._yt_counter}"
+        self._yt_counter += 1
+        self.yt_tasks[gid] = {
+            'url': url, 'title': title or '视频下载',
+            'state': 'downloading', 'progress': 0,
+            'size': 0, 'download_rate': 0, 'format_id': format_id,
+            'output': '', '_is_audio_only': is_audio_only,
+            '_downloaded': 0, '_eta': 0,
+            'added_at': time.time(),
+        }
+        t = threading.Thread(target=self._download_yt_thread,
+                             args=(gid, url, format_id, title or '视频下载'),
+                             daemon=True)
+        t.start()
+        return gid
+
+    def stop_yt_download(self, gid, skip_trash=False):
+        """Stop a yt-dlp download."""
+        if gid in self.yt_tasks:
+            info = self.yt_tasks[gid]
+            # yt-dlp doesn't have a process we can kill easily in thread mode
+            # Mark as removed so the thread will check and stop updating
+            info['state'] = 'removed'
+            if not skip_trash:
+                output = info.get('output', '')
+                self.records["trash"].insert(0, {
+                    "gid": gid, "type": "yt_media", "name": info.get('title', '视频下载'),
+                    "url": info.get('url', ''), "dir": self.save_path,
+                    "paths": [output] if output and os.path.exists(output) else [],
+                    "size": info.get('size', 0), "completed_at": int(time.time()),
+                })
+                self._save_records()
+            else:
+                output = info.get('output', '')
+                if output and os.path.exists(output):
+                    try:
+                        os.remove(output)
+                    except Exception:
+                        pass
+            del self.yt_tasks[gid]
+            return True
+        return False
+
     # ---- ed2k → magnet conversion ----
     def _convert_ed2k(self, url):
         """Convert an ed2k link to a magnet/torrent download by searching
@@ -1654,6 +2003,8 @@ def api_pause():
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.pause_m3u8_download(gid))
+    if gid and gid.startswith("yt_"):
+        return jsonify(ok=False, error="yt-dlp 下载不支持暂停")
     return jsonify(ok=engine.pause(data.get("gid")))
 
 
@@ -1684,6 +2035,8 @@ def api_stop():
     skip_trash = data.get("skip_trash", False)
     if gid and gid.startswith("m3u8_"):
         engine.stop_m3u8_download(gid, skip_trash=skip_trash)
+    elif gid and gid.startswith("yt_"):
+        engine.stop_yt_download(gid, skip_trash=skip_trash)
     else:
         engine.stop(gid, skip_trash=skip_trash)
     return jsonify(ok=True)
@@ -1759,14 +2112,33 @@ def api_download_m3u8():
     return jsonify(ok=True, gid=gid, type="m3u8")
 
 
-@app.route("/api/confirm_ed2k", methods=["POST"])
-def api_confirm_ed2k():
-    """Confirm an ed2k download after user reviews the preview card."""
+@app.route("/api/download_yt", methods=["POST"])
+def api_download_yt():
+    """启动 YouTube/X 视频下载。"""
     data = request.get_json(force=True)
-    gid = data.get("gid", "")
-    action = data.get("action", "download")
-    if not gid:
-        return jsonify(ok=False, error="缺少 gid"), 400
+    url = data.get("url", "").strip()
+    title = data.get("title", "").strip()
+    format_id = data.get("format_id", "") or None
+    is_audio_only = data.get("is_audio_only", False)
+    if not url:
+        return jsonify(ok=False, error="请输入视频链接"), 400
+    gid = engine.start_yt_download(url, format_id=format_id, title=title or "视频下载",
+                                    is_audio_only=is_audio_only)
+    return jsonify(ok=True, gid=gid, type="yt_media")
+
+
+@app.route("/api/yt_info", methods=["POST"])
+def api_yt_info():
+    """提取 YouTube/X 视频信息（格式列表），不自动下载。"""
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify(ok=False, error="请输入视频链接"), 400
+    result = engine._extract_yt_info(url)
+    return jsonify(result)
+
+
+
 @app.route("/api/choose_dir", methods=["POST"])
 def api_choose_dir():
     """打开系统原生文件夹选择对话框，返回选中的路径。"""
