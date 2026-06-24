@@ -2060,7 +2060,7 @@ class Engine:
                 if gid not in existing:
                     existing.add(gid)
                     self.records["history"].insert(0, {
-                        "gid": gid, "type": "yt_media", "name": info.get('title', '视频下载'),
+                        "gid": gid, "type": info.get('type', 'yt_media'), "name": info.get('title', '视频下载'),
                         "url": info.get('url', ''), "dir": self.save_path,
                         "paths": [output] if output else [],
                         "size": info.get('size', 0), "completed_at": int(time.time()),
@@ -2074,7 +2074,7 @@ class Engine:
                 pct = round(100 * downloaded / total, 1)
             items.append({
                 "gid": gid,
-                "type": "yt_media",
+                "type": info.get('type', 'yt_media'),
                 "name": info.get('title', '视频下载'),
                 "state": state,
                 "progress": pct,
@@ -2743,31 +2743,43 @@ class Engine:
                 'preferedformat': 'mp4',
             }]
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+        # Try download without cookies first, then with browser cookies
+        last_error = None
+        cookie_opts = [None, ('chrome',), ('safari',)]
+        for cookie_opt in cookie_opts:
+            try:
+                opts = dict(ydl_opts)
+                if cookie_opt:
+                    opts['cookiesfrombrowser'] = cookie_opt
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
 
-            if gid in self.yt_tasks:
-                task = self.yt_tasks[gid]
-                if task.get('state') != 'error':
-                    task['state'] = 'finished'
-                    task['progress'] = 100
-                    # Find actual output file
-                    if not task.get('output') or not os.path.exists(task['output']):
-                        # yt-dlp may change extension after post-processing
-                        for ext in ('.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.opus'):
-                            candidate = os.path.join(self.save_path, f"{safe_title}{ext}")
-                            if os.path.exists(candidate):
-                                task['output'] = candidate
-                                task['size'] = os.path.getsize(candidate)
-                                break
-                    else:
-                        if os.path.exists(task['output']):
-                            task['size'] = os.path.getsize(task['output'])
-        except Exception as e:
-            if gid in self.yt_tasks:
-                self.yt_tasks[gid]['state'] = 'error'
-                self.yt_tasks[gid]['error'] = str(e)
+                if gid in self.yt_tasks:
+                    task = self.yt_tasks[gid]
+                    if task.get('state') != 'error':
+                        task['state'] = 'finished'
+                        task['progress'] = 100
+                        # Find actual output file
+                        if not task.get('output') or not os.path.exists(task['output']):
+                            for ext in ('.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.opus'):
+                                candidate = os.path.join(self.save_path, f"{safe_title}{ext}")
+                                if os.path.exists(candidate):
+                                    task['output'] = candidate
+                                    task['size'] = os.path.getsize(candidate)
+                                    break
+                        else:
+                            if os.path.exists(task['output']):
+                                task['size'] = os.path.getsize(task['output'])
+                return  # Success, don't retry
+            except Exception as e:
+                last_error = e
+                if gid not in self.yt_tasks:
+                    return
+                continue
+        # All attempts failed
+        if gid in self.yt_tasks:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = str(last_error)
 
     def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False):
         """Start a YouTube/X video download. Returns gid."""
@@ -2797,7 +2809,7 @@ class Engine:
             if not skip_trash:
                 output = info.get('output', '')
                 self.records["trash"].insert(0, {
-                    "gid": gid, "type": "yt_media", "name": info.get('title', '视频下载'),
+                    "gid": gid, "type": info.get('type', 'yt_media'), "name": info.get('title', '视频下载'),
                     "url": info.get('url', ''), "dir": self.save_path,
                     "paths": [output] if output and os.path.exists(output) else [],
                     "size": info.get('size', 0), "completed_at": int(time.time()),
@@ -3369,7 +3381,7 @@ def api_download_yt():
         return jsonify(ok=False, error="请输入视频链接"), 400
     gid = engine.start_yt_download(url, format_id=format_id, title=title or "视频下载",
                                     is_audio_only=is_audio_only)
-    return jsonify(ok=True, gid=gid, type="yt_media")
+    return jsonify(ok=True, gid=gid, type=classify(url) or "yt_media")
 
 
 @app.route("/api/yt_info", methods=["POST"])
