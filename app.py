@@ -53,8 +53,10 @@ def classify(url):
             return "yt_media"
         if re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', u):
             return "yt_media"
-        # 微博 — yt-dlp handler
-        if re.match(r'https?://(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn)/', u):
+        # 微博 — yt-dlp handler (supports weibo.com, t.cn, share.api.weibo.cn)
+        if re.match(r'https?://(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn)/', u):
+            return "weibo"
+        if re.match(r'https?://t\.cn/', u):
             return "weibo"
         # 抖音 — yt-dlp handler
         if re.match(r'https?://(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com)/', u):
@@ -177,18 +179,44 @@ def _extract_with_playwright(url):
 
     try:
         with sync_playwright() as p:
-            # Use persistent context with Chrome's user data — inherits ALL login cookies
-            # No need to manually read Chrome's cookie database
             chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+            context = None
+
             if os.path.exists(chrome_profile):
-                context = p.chromium.launch_persistent_context(
-                    chrome_profile,
-                    headless=True,
-                    channel="chrome",
-                    args=["--disable-blink-features=AutomationControlled"],
-                )
-            else:
-                # Fallback: fresh browser without cookies
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        chrome_profile,
+                        headless=True,
+                        channel="chrome",
+                        args=["--disable-blink-features=AutomationControlled"],
+                    )
+                except Exception:
+                    # Chrome is running -> copy profile to temp dir
+                    import tempfile, shutil
+                    tmp_profile = tempfile.mkdtemp(prefix="chrome_profile_")
+                    try:
+                        shutil.copytree(chrome_profile, tmp_profile,
+                                        dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns(
+                                            'SingletonLock', 'SingletonSocket',
+                                            'SingletonCookie', 'Lockfile',
+                                            'RunningChromeVersion', 'Crashpad',
+                                            'GPUCache', 'ShaderCache',
+                                            'Cache', 'Code Cache',
+                                            'DawnGraphiteCache', 'DawnWebGPUCache',
+                                            'WebStorage', 'Service Worker',
+                                            'Network Persistent State',
+                                        ))
+                        context = p.chromium.launch_persistent_context(
+                            tmp_profile,
+                            headless=True,
+                            channel="chrome",
+                            args=["--disable-blink-features=AutomationControlled"],
+                        )
+                    except Exception:
+                        pass
+
+            if not context:
                 browser = p.chromium.launch(headless=True)
                 context = browser.new_context()
 
