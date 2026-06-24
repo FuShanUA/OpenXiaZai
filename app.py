@@ -2684,6 +2684,10 @@ class Engine:
             'proc': None, '_last_size': 0, '_last_time': time.time(),
             '_smooth_rate': 0, 'added_at': time.time(),
         }
+        # Preserve platform type from start_yt_download (e.g. weibo/douyin)
+        existing = self.yt_tasks.get(gid, {})
+        if existing.get('type'):
+            info['type'] = existing['type']
         self.yt_tasks[gid] = info
 
         def progress_hook(d):
@@ -2787,6 +2791,7 @@ class Engine:
         self._yt_counter += 1
         self.yt_tasks[gid] = {
             'url': url, 'title': title or '视频下载',
+            'type': classify(url),  # 正确的平台类型 (weibo/douyin/etc)
             'state': 'downloading', 'progress': 0,
             'size': 0, 'download_rate': 0, 'format_id': format_id,
             'output': '', '_is_audio_only': is_audio_only,
@@ -3526,7 +3531,27 @@ def api_bili_poster():
         content_type = r.headers.get("Content-Type", "image/jpeg")
         return Response(r.content, content_type=content_type)
     except Exception:
-        return "", 404@app.route("/api/choose_dir", methods=["POST"])
+        return "", 404
+
+
+@app.route("/api/poster_proxy")
+def api_poster_proxy():
+    """代理任意封面图片（解决Referer/CORS限制）。"""
+    url = request.args.get("url", "").strip()
+    if not url or not url.startswith("http"):
+        return "", 400
+    url = url.replace("http://", "https://")
+    try:
+        r = requests.get(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Referer': 'https://' + url.split('/')[2] + '/',
+        }, timeout=10)
+        return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
+    except Exception:
+        return "", 404
+
+
+@app.route("/api/choose_dir", methods=["POST"])
 def api_choose_dir():
     """打开系统原生文件夹选择对话框，返回选中的路径。"""
     try:

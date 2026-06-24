@@ -849,7 +849,7 @@ function showYtPreview(data){
   }
   $('ytMeta').textContent=meta;
   $('ytDesc').textContent=data.description||'';
-  if(data.poster){$('ytPoster').src=data.poster;$('ytPoster').style.display=''}
+  if(data.poster){$('ytPoster').src='/api/poster_proxy?url='+encodeURIComponent(data.poster);$('ytPoster').style.display=''}
   else{$('ytPoster').style.display='none'}
   // Build format buttons
   const fmts=data.formats||[];
