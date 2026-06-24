@@ -2572,12 +2572,18 @@ class Engine:
 
         if not info:
             # yt-dlp failed — try Playwright with Chrome persistent context
-            # Works for sites w/ encrypted cookies (抖音/微博) and JS-only video players
             result = _extract_with_playwright(url)
             if result and result.get("ok"):
                 result["type"] = classify(url) or "yt_media"
                 return result
-            return {"ok": False, "error": "未获取到视频信息", "type": classify(url) or "yt_media"}
+            t = classify(url) or "yt_media"
+            hints = {
+                "iqiyi": "爱奇艺需要浏览器Cookie才能提取视频。请先在Chrome中访问iqiyi.com，然后重试粘贴链接。",
+                "mgtv": "芒果TV可能需要登录Cookie。请先在Chrome中访问mgtv.com并登录，然后重试。",
+                "tencent": "腾讯视频可能需要登录Cookie。请先在Chrome中访问v.qq.com并登录，然后重试。",
+            }
+            return {"ok": False, "error": "未获取到视频信息", "type": t,
+                    "hint": hints.get(t, "")}
 
         title = info.get('title', '') or '未知视频'
         thumbnail = info.get('thumbnail', '') or ''
