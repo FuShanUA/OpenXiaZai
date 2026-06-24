@@ -530,7 +530,7 @@ $('addBtn').onclick=async()=>{
   }
 
   // yt-dlp 支持的更多平台（微博/抖音/TikTok/Facebook/Spotify/网易/快手/小红书/西瓜）
-  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|douyin\.com|v\.douyin\.com|iesdouyin\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|iqiyi\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
+  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|douyin\.com|v\.douyin\.com|iesdouyin\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|m\.iqiyi\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
   if(YT_PLATFORMS.test(v)){
     $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
     try{
