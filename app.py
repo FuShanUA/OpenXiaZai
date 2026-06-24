@@ -82,6 +82,12 @@ def classify(url):
         # 西瓜视频 — yt-dlp handler
         if re.match(r'https?://(www\.)?ixigua\.com/', u):
             return "ixigua"
+        # 芒果TV — yt-dlp handler
+        if re.match(r'https?://(www\.|m\.)?mgtv\.com/', u):
+            return "mgtv"
+        # 爱奇艺 — yt-dlp handler
+        if re.match(r'https?://(www\.|m\.)?iqiyi\.com/', u):
+            return "iqiyi"
         if "pan.quark.cn" in u or "quark.cn" in u:
             return "quark"
         if any(h in u for h in ("pan.baidu.com", "115.com", "aliyundrive", "alipan.com")):
@@ -740,6 +746,8 @@ TYPES = {
     "kuaishou": "快手视频",
     "xiaohongshu": "小红书",
     "ixigua": "西瓜视频",
+    "mgtv": "芒果TV",
+    "iqiyi": "爱奇艺",
     "quark": "夸克网盘",
     "cloud": "网盘链接",
     "thunder": "迅雷链接",
@@ -1599,7 +1607,8 @@ class Engine:
             return self._extract_yt_info(url)
         # All yt-dlp supported platforms (微博/抖音/TikTok/Facebook/Spotify/etc)
         yt_dlp_types = {"weibo", "douyin", "tiktok", "facebook", "spotify",
-                        "netease", "kuaishou", "xiaohongshu", "ixigua"}
+                        "netease", "kuaishou", "xiaohongshu", "ixigua",
+                        "mgtv", "iqiyi"}
         if t in yt_dlp_types:
             result = self._extract_yt_info(url)
             if result and result.get("ok"):
