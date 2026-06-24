@@ -2532,6 +2532,15 @@ class Engine:
         # Try without cookies first (fast, works for public content like YouTube)
         info = None
         drm_detected = False
+
+        # For platforms that require cookies (iQiyi/MGTV/Tencent), try Playwright first
+        t = classify(url) or ""
+        if t in ("iqiyi", "mgtv", "tencent"):
+            result = _extract_with_playwright(url)
+            if result and result.get("ok"):
+                result["type"] = t
+                return result
+
         try:
             ydl_opts = {
                 'quiet': True,
