@@ -169,6 +169,97 @@ def _detect_login_required(html):
     return ''
 
 
+def _get_cookies_via_playwright(url):
+    """Launch Playwright with Chrome profile, get cookies for the target site.
+    Returns path to a temp Netscape-format cookie file, or None on failure.
+    Used by yt-dlp to access sites that require browser cookies (iQiyi/MGTV/Tencent)."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    import tempfile
+    from urllib.parse import urlparse
+
+    domain = urlparse(url).hostname or ""
+    if not domain:
+        return None
+
+    try:
+        with sync_playwright() as p:
+            chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+            context = None
+
+            if os.path.exists(chrome_profile):
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        chrome_profile, headless=True, channel="chrome",
+                        args=["--disable-blink-features=AutomationControlled"],
+                    )
+                except Exception:
+                    import shutil
+                    tmp_profile = tempfile.mkdtemp(prefix="chrome_profile_")
+                    try:
+                        shutil.copytree(chrome_profile, tmp_profile, dirs_exist_ok=True,
+                                        ignore=shutil.ignore_patterns(
+                                            'SingletonLock', 'SingletonSocket',
+                                            'SingletonCookie', 'Lockfile', 'Crashpad',
+                                            'GPUCache', 'ShaderCache', 'Cache', 'Code Cache',
+                                            'DawnGraphiteCache', 'DawnWebGPUCache',
+                                            'WebStorage', 'Service Worker', 'Network Persistent State',
+                                        ))
+                        context = p.chromium.launch_persistent_context(
+                            tmp_profile, headless=True, channel="chrome",
+                            args=["--disable-blink-features=AutomationControlled"],
+                        )
+                    except Exception:
+                        pass
+
+            if not context:
+                return None
+
+            # Navigate to the page to ensure cookies are valid/refreshed
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
+            # Get all cookies for the domain
+            cookies = context.cookies()
+            if not cookies:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                return None
+
+            # Write to Netscape cookie file format
+            fd, cookiefile = tempfile.mkstemp(suffix=".txt", prefix="ytdl_cookies_")
+            with os.fdopen(fd, 'w') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                for c in cookies:
+                    domain_str = c.get('domain', '')
+                    flag = 'TRUE' if domain_str.startswith('.') else 'FALSE'
+                    secure = 'TRUE' if c.get('secure') else 'FALSE'
+                    expires = str(int(c.get('expires', -1))) if c.get('expires', -1) > 0 else '0'
+                    name = c.get('name', '')
+                    value = c.get('value', '')
+                    path = c.get('path', '/')
+                    f.write(f"{domain_str}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+
+            try:
+                context.close()
+            except Exception:
+                pass
+
+            return cookiefile
+
+    except Exception:
+        return None
+
+
 def _extract_with_playwright(url):
     """使用 Playwright 无头浏览器渲染页面，拦截网络请求中的 m3u8/mp4 URL。
 
@@ -2534,12 +2625,11 @@ class Engine:
         drm_detected = False
 
         # For platforms that require cookies (iQiyi/MGTV/Tencent), try Playwright first
+        # to get cookies from Chrome, then pass to yt-dlp
         t = classify(url) or ""
+        cookiefile = None
         if t in ("iqiyi", "mgtv", "tencent"):
-            result = _extract_with_playwright(url)
-            if result and result.get("ok"):
-                result["type"] = t
-                return result
+            cookiefile = _get_cookies_via_playwright(url)
 
         try:
             ydl_opts = {
@@ -2548,6 +2638,8 @@ class Engine:
                 'extract_flat': False,
                 'skip_download': True,
             }
+            if cookiefile:
+                ydl_opts['cookiefile'] = cookiefile
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception as e:
@@ -2697,6 +2789,11 @@ class Engine:
             "url": url,
             "yt_source": True,
         }
+        if cookiefile:
+            try:
+                os.unlink(cookiefile)
+            except Exception:
+                pass
 
     def _download_yt_thread(self, gid, url, format_id, title):
         """Download YouTube/X video in background thread using yt-dlp."""
