@@ -169,6 +169,113 @@ def _detect_login_required(html):
     return ''
 
 
+def _launch_playwright_context():
+    """Launch Playwright with Chrome profile cookies, handling Chrome-already-running.
+    Returns (context, tmp_profile_dir) or (None, None) on failure.
+    Caller MUST close the context and clean up tmp_profile_dir when done."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, None
+
+    import tempfile as _tempfile
+
+    p = sync_playwright().start()
+    chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    context = None
+    tmp_profile = None
+
+    STEALTH_UA = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    )
+    STEALTH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run", "--no-default-browser-check",
+        "--disable-dev-shm-usage",
+    ]
+
+    if os.path.exists(chrome_profile):
+        try:
+            context = p.chromium.launch_persistent_context(
+                chrome_profile, headless=True, channel="chrome",
+                user_agent=STEALTH_UA,
+                args=STEALTH_ARGS,
+            )
+        except Exception:
+            tmp_profile = _tempfile.mkdtemp(prefix="chrome_profile_")
+            try:
+                shutil.copytree(chrome_profile, tmp_profile, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns(
+                                    'SingletonLock', 'SingletonSocket',
+                                    'SingletonCookie', 'Lockfile', 'Crashpad',
+                                    'GPUCache', 'ShaderCache', 'Cache', 'Code Cache',
+                                    'DawnGraphiteCache', 'DawnWebGPUCache',
+                                    'WebStorage', 'Service Worker', 'Network Persistent State',
+                                    'RunningChromeVersion', 'Local State',
+                                    'BrowserMetrics', 'Variations',
+                                ),
+                                ignore_dangling_symlinks=True)
+            except Exception:
+                try:
+                    shutil.copytree(chrome_profile, tmp_profile, dirs_exist_ok=True,
+                                    ignore=shutil.ignore_patterns(
+                                        'SingletonLock', 'SingletonSocket',
+                                        'SingletonCookie', 'Lockfile', 'Crashpad',
+                                        'GPUCache', 'ShaderCache', 'Cache', 'Code Cache',
+                                        'DawnGraphiteCache', 'DawnWebGPUCache',
+                                        'WebStorage', 'Service Worker', 'Network Persistent State',
+                                        'RunningChromeVersion', 'Local State',
+                                        'BrowserMetrics', 'Variations',
+                                    ))
+                except Exception:
+                    shutil.rmtree(tmp_profile, ignore_errors=True)
+                    tmp_profile = None
+
+            if tmp_profile:
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        tmp_profile, headless=True, channel="chrome",
+                        user_agent=STEALTH_UA,
+                        args=STEALTH_ARGS,
+                    )
+                except Exception:
+                    if tmp_profile:
+                        shutil.rmtree(tmp_profile, ignore_errors=True)
+                        tmp_profile = None
+
+    if not context:
+        try:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=STEALTH_UA)
+        except Exception:
+            try:
+                p.stop()
+            except Exception:
+                pass
+            return None, None
+
+    context._pw = p
+    return context, tmp_profile
+
+
+def _close_playwright_context(context, tmp_profile):
+    """Close Playwright context and clean up temp profile."""
+    if context:
+        pw = getattr(context, '_pw', None)
+        try:
+            context.close()
+        except Exception:
+            pass
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+    if tmp_profile:
+        shutil.rmtree(tmp_profile, ignore_errors=True)
+
+
 def _get_cookies_via_playwright(url):
     """Launch Playwright with Chrome profile, get cookies for the target site.
     Returns path to a temp Netscape-format cookie file, or None on failure.
@@ -258,6 +365,348 @@ def _get_cookies_via_playwright(url):
 
     except Exception:
         return None
+
+
+
+def _extract_douyin_from_page(page, url):
+    """Extract Douyin video info from a rendered page using Playwright.
+    Douyin loads video via blob URLs (MSE), so we can't read the <video> src.
+    Instead we intercept the aweme/v1/web/aweme/detail API response, which
+    contains the full video metadata including direct mp4 URLs.
+    Returns a dict with video info, or None."""
+    try:
+        api_data = [None]
+
+        def handle_response(response):
+            rurl = response.url
+            if 'aweme/v1/web/aweme/detail' in rurl:
+                try:
+                    api_data[0] = response.json()
+                except Exception:
+                    pass
+
+        page.on('response', handle_response)
+        page.wait_for_timeout(6000)
+
+        try:
+            page.remove_listener('response', handle_response)
+        except Exception:
+            pass
+
+        detail = None
+        if api_data[0] and isinstance(api_data[0], dict):
+            detail = api_data[0].get('aweme_detail')
+
+        if not detail:
+            video_urls = []
+
+            def handle_video_response(response):
+                ct = response.headers.get('content-type', '')
+                if 'video' not in ct:
+                    return
+                rurl = response.url
+                if 'douyinstatic' in rurl:
+                    return
+                cl = 0
+                try:
+                    cl = int(response.headers.get('content-length', '0') or '0')
+                except Exception:
+                    pass
+                if cl < 100000:
+                    return
+                video_urls.append((rurl, cl))
+
+            page.on('response', handle_video_response)
+            try:
+                page.click('video', timeout=3000)
+                page.wait_for_timeout(5000)
+            except Exception:
+                pass
+            try:
+                page.remove_listener('response', handle_video_response)
+            except Exception:
+                pass
+
+            if video_urls:
+                video_urls.sort(key=lambda x: x[1], reverse=True)
+                best_video_url = video_urls[0][0]
+                title = page.evaluate(
+                    "() => { const t = document.title || '';"
+                    " return t.replace(/\\s*-\\s*抖音\\s*$/, ''.trim(); }"
+                ) or ""
+                poster = page.evaluate(
+                    '() => { const v = document.querySelector("video[poster]");'
+                    ' if (v && v.poster) return v.poster;'
+                    ' const og = document.querySelector("meta[property=\"og:image\"]");'
+                    ' return og ? og.content || "" : ""; }'
+                ) or ""
+                return {
+                    "ok": True,
+                    "title": title or "抖音视频",
+                    "poster": poster,
+                    "m3u8_url": best_video_url,
+                    "magnet": "",
+                    "type": "douyin",
+                }
+            return None
+
+        video = detail.get('video', {}) or {}
+        play_addr = video.get('play_addr', {}) or {}
+        play_urls = play_addr.get('url_list', []) or []
+
+        if not play_urls:
+            bit_rate = video.get('bit_rate', []) or []
+            for br in bit_rate:
+                br_pa = (br.get('play_addr') or {}).get('url_list', []) or []
+                if br_pa:
+                    play_urls = br_pa
+                    break
+
+        if not play_urls:
+            return None
+
+        best_video_url = play_urls[0]
+
+        formats = []
+        seen_urls = set()
+        bit_rate = video.get('bit_rate', []) or []
+        for br in bit_rate:
+            br_pa = br.get('play_addr', {}) or {}
+            br_urls = br_pa.get('url_list', []) or []
+            if not br_urls or br_urls[0] in seen_urls:
+                continue
+            seen_urls.add(br_urls[0])
+            gear = br.get('gear_name', '') or ''
+            quality_type = br.get('quality_type', 0) or 0
+            bitrate = br.get('bitrate', 0) or 0
+            height = (br.get('play_addr_h264', {}) or {}).get('height', 0) or video.get('height', 0) or 0
+            filesize = (br_pa.get('data_size', 0) or 0) or 0
+            label = gear or ('%dp' % height if height else '')
+            formats.append({
+                'format_id': 'douyin_%s' % (quality_type or len(formats)),
+                'label': label, 'ext': 'mp4', 'height': height,
+                'filesize': filesize, 'tbr': bitrate,
+                'vcodec': 'h264', 'acodec': 'aac',
+                'is_video_audio': True, 'is_video_only': False, 'is_audio_only': False,
+                'url': br_urls[0],
+            })
+
+        if not formats:
+            formats.append({
+                'format_id': 'douyin_default', 'label': '默认', 'ext': 'mp4',
+                'height': video.get('height', 0) or 0, 'filesize': 0, 'tbr': 0,
+                'vcodec': 'h264', 'acodec': 'aac',
+                'is_video_audio': True, 'is_video_only': False, 'is_audio_only': False,
+                'url': best_video_url,
+            })
+
+        desc = (detail.get('desc', '') or '').strip()
+        title = desc or ''
+        author = (detail.get('author', {}) or {}).get('nickname', '') or ''
+
+        cover = (video.get('cover', {}) or {}).get('url_list', []) or []
+        poster = cover[0] if cover else ''
+        if not poster:
+            origin_cover = (video.get('origin_cover', {}) or {}).get('url_list', []) or []
+            poster = origin_cover[0] if origin_cover else ''
+
+        duration = (video.get('duration', 0) or 0) // 1000
+
+        return {
+            "ok": True, "title": title or "抖音视频", "poster": poster,
+            "m3u8_url": best_video_url, "magnet": "", "type": "douyin",
+            "duration": duration, "uploader": author, "platform": "抖音",
+            "formats": formats,
+        }
+
+    except Exception:
+        return None
+
+
+def _extract_kuaishou_info(url):
+    """Extract Kuaishou video info from the mobile share page.
+    The desktop site's GraphQL API triggers captcha for headless browsers,
+    but the mobile share page (m.gifshow.com) embeds all video data in
+    window.INIT_STATE — no captcha, no Playwright needed."""
+    import json as _json
+
+    final_url = url
+    photo_id = None
+    try:
+        r = requests.head(url, headers={
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) '
+                          'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+        }, timeout=10, allow_redirects=True)
+        if r.url:
+            final_url = r.url
+    except Exception:
+        pass
+
+    m = re.search(r'/short-video/(\w+)', final_url)
+    if m:
+        photo_id = m.group(1)
+    if not photo_id:
+        m = re.search(r'/photo/(\w+)', final_url)
+        if m:
+            photo_id = m.group(1)
+    if not photo_id:
+        m = re.search(r'/fw/photo/(\w+)', final_url)
+        if m:
+            photo_id = m.group(1)
+    if not photo_id:
+        m = re.search(r'/f/([A-Za-z0-9_-]+)', final_url)
+        if m:
+            photo_id = m.group(1)
+
+    if not photo_id:
+        return {"ok": False, "error": "无法从URL中提取快手视频ID", "type": "kuaishou"}
+
+    try:
+        r = requests.get(
+            'https://www.kuaishou.com/short-video/' + photo_id,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) '
+                              'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9',
+            },
+            timeout=15, allow_redirects=True,
+        )
+        html = r.text
+    except Exception:
+        return {"ok": False, "error": "无法获取快手页面内容", "type": "kuaishou"}
+
+    if not html or len(html) < 1000:
+        return {"ok": False, "error": "无法获取快手页面内容（可能被反爬限制）", "type": "kuaishou"}
+
+    init_state = None
+    m = re.search(r'window\.INIT_STATE\s*=\s*', html)
+    if m:
+        brace_start = html.find('{', m.end())
+        if brace_start >= 0:
+            depth = 0
+            in_str = False
+            escape = False
+            end_idx = None
+            for i in range(brace_start, len(html)):
+                c = html[i]
+                if escape:
+                    escape = False
+                    continue
+                if c == '\\':
+                    escape = True
+                    continue
+                if c == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+            if end_idx:
+                try:
+                    init_state = _json.loads(html[brace_start:end_idx + 1])
+                except Exception:
+                    pass
+
+    if not init_state:
+        return {"ok": False, "error": "无法解析快手页面数据", "type": "kuaishou"}
+
+    def _find_photo(obj, depth=0):
+        if depth > 5:
+            return None
+        if isinstance(obj, dict):
+            if 'manifest' in obj and ('caption' in obj or 'mainMvUrls' in obj):
+                return obj
+            for k, v in obj.items():
+                result = _find_photo(v, depth + 1)
+                if result:
+                    return result
+        elif isinstance(obj, list):
+            for item in obj:
+                result = _find_photo(item, depth + 1)
+                if result:
+                    return result
+        return None
+
+    photo = _find_photo(init_state)
+    if not photo:
+        return {"ok": False, "error": "未找到快手视频数据", "type": "kuaishou"}
+
+    title = (photo.get('caption', '') or '').strip().lstrip('#').strip() or '快手视频'
+    duration = (photo.get('duration', 0) or 0) / 1000.0
+    uploader = photo.get('userName', '') or ''
+
+    cover_urls = photo.get('coverUrls', []) or []
+    cover = ''
+    if cover_urls and isinstance(cover_urls[0], dict):
+        cover = cover_urls[0].get('url', '') or ''
+    if not cover:
+        webp = photo.get('webpCoverUrls', []) or []
+        if webp and isinstance(webp[0], dict):
+            cover = webp[0].get('url', '') or ''
+
+    formats = []
+    seen_urls = set()
+
+    manifest = photo.get('manifest', {}) or {}
+    adaptation_set = manifest.get('adaptationSet', []) or []
+    if isinstance(adaptation_set, list):
+        for aset in adaptation_set:
+            if not isinstance(aset, dict):
+                continue
+            for rep in aset.get('representation', []) or []:
+                rep_url = rep.get('url', '') or ''
+                if not rep_url or rep_url in seen_urls:
+                    continue
+                seen_urls.add(rep_url)
+                height = rep.get('height', 0) or 0
+                quality_label = rep.get('qualityLabel', '') or ''
+                bitrate = rep.get('avgBitrate', 0) or 0
+                width = rep.get('width', 0) or 0
+                label = quality_label or ('%dp' % height if height else '标准')
+                formats.append({
+                    'format_id': 'h264_%s' % (rep.get('id', len(formats))),
+                    'label': label, 'ext': 'mp4', 'height': height,
+                    'width': width, 'filesize': 0, 'tbr': bitrate,
+                    'vcodec': 'h264', 'acodec': 'aac',
+                    'is_video_audio': True, 'is_video_only': False, 'is_audio_only': False,
+                    'url': rep_url, 'backup_urls': rep.get('backupUrl', []) or [],
+                })
+
+    if not formats:
+        main_mv = photo.get('mainMvUrls', []) or []
+        for mv in main_mv:
+            mv_url = mv.get('url', '') if isinstance(mv, dict) else ''
+            if not mv_url or mv_url in seen_urls:
+                continue
+            seen_urls.add(mv_url)
+            height = photo.get('height', 0) or 0
+            formats.append({
+                'format_id': 'ks_default', 'label': '默认', 'ext': 'mp4',
+                'height': height, 'width': photo.get('width', 0) or 0,
+                'filesize': 0, 'tbr': 0, 'vcodec': 'h264', 'acodec': 'aac',
+                'is_video_audio': True, 'is_video_only': False, 'is_audio_only': False,
+                'url': mv_url, 'backup_urls': [],
+            })
+
+    if not formats:
+        return {"ok": False, "error": "未找到可下载的视频格式", "type": "kuaishou"}
+
+    formats.sort(key=lambda f: f.get('height', 0), reverse=True)
+
+    return {
+        "ok": True, "type": "kuaishou", "title": title, "poster": cover,
+        "m3u8_url": formats[0].get("url", ""), "magnet": "",
+        "duration": int(duration), "uploader": uploader, "description": "",
+        "platform": "快手", "formats": formats, "url": url, "ks_source": True,
+    }
+
 
 
 def _extract_with_playwright(url):
@@ -1585,6 +2034,7 @@ class Engine:
         self._yt_counter = 0
         self.bili_tasks = {}    # gid -> {url, title, state, progress, ...}
         self._bili_counter = 0
+        self._format_m3u8_map = {}  # (url, format_id) -> direct video URL
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
@@ -2623,10 +3073,39 @@ class Engine:
         # Try without cookies first (fast, works for public content like YouTube)
         info = None
         drm_detected = False
+        t = classify(url) or ""
+
+        # For Douyin: yt-dlp needs fresh cookies that Playwright can't provide.
+        # Use Playwright to intercept the aweme/v1/web/aweme/detail API response.
+        if t == "douyin":
+            try:
+                context, tmp_profile = _launch_playwright_context()
+                if context:
+                    try:
+                        page = context.new_page()
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                        except Exception:
+                            pass
+                        result = _extract_douyin_from_page(page, url)
+                        if result and result.get("ok"):
+                            result["yt_source"] = True
+                            return result
+                    finally:
+                        _close_playwright_context(context, tmp_profile)
+            except Exception:
+                pass
+
+        # For Kuaishou: yt-dlp doesn't support kuaishou.com URLs.
+        # Use the mobile share page to extract video data.
+        if t == "kuaishou":
+            result = _extract_kuaishou_info(url)
+            if result and result.get("ok"):
+                result["yt_source"] = True
+                return result
 
         # For platforms that require cookies (iQiyi/MGTV/Tencent), try Playwright first
         # to get cookies from Chrome, then pass to yt-dlp
-        t = classify(url) or ""
         cookiefile = None
         if t in ("iqiyi", "mgtv", "tencent"):
             cookiefile = _get_cookies_via_playwright(url)
@@ -2814,6 +3293,37 @@ class Engine:
         if existing.get('type'):
             info['type'] = existing['type']
         self.yt_tasks[gid] = info
+
+        # For Douyin/Kuaishou: extract a fresh direct URL before downloading
+        if t in ("douyin", "kuaishou"):
+            fresh_url = None
+            if t == "kuaishou":
+                try:
+                    fresh = _extract_kuaishou_info(url)
+                    if fresh.get("ok") and fresh.get("formats"):
+                        fresh_url = fresh["formats"][0].get("url", "")
+                except Exception:
+                    pass
+            elif t == "douyin":
+                try:
+                    context, tmp_profile = _launch_playwright_context()
+                    if context:
+                        try:
+                            page = context.new_page()
+                            try:
+                                page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                            except Exception:
+                                pass
+                            fresh = _extract_douyin_from_page(page, url)
+                            if fresh and fresh.get("ok"):
+                                fresh_url = fresh.get("m3u8_url", "")
+                        finally:
+                            _close_playwright_context(context, tmp_profile)
+                except Exception:
+                    pass
+            if fresh_url:
+                url = fresh_url
+                format_id = None
 
         def progress_hook(d):
             if gid not in self.yt_tasks:
