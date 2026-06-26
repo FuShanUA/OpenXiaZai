@@ -447,6 +447,7 @@ def _extract_douyin_from_page(page, url):
                     "m3u8_url": best_video_url,
                     "magnet": "",
                     "type": "douyin",
+                    "url": url,
                 }
             return None
 
@@ -516,7 +517,7 @@ def _extract_douyin_from_page(page, url):
             "ok": True, "title": title or "抖音视频", "poster": poster,
             "m3u8_url": best_video_url, "magnet": "", "type": "douyin",
             "duration": duration, "uploader": author, "platform": "抖音",
-            "formats": formats,
+            "formats": formats, "url": url,
         }
 
     except Exception:
