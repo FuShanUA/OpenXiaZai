@@ -3295,6 +3295,7 @@ class Engine:
         self.yt_tasks[gid] = info
 
         # For Douyin/Kuaishou: extract a fresh direct URL before downloading
+        t = classify(url) or ""
         if t in ("douyin", "kuaishou"):
             fresh_url = None
             if t == "kuaishou":
@@ -3357,6 +3358,14 @@ class Engine:
             'outtmpl': output_template,
             'overwrites': True,
         }
+
+        # For Douyin/Kuaishou direct URLs: add Referer header to avoid 403
+        if t in ("douyin", "kuaishou"):
+            referer = "https://www.douyin.com/" if t == "douyin" else "https://www.kuaishou.com/"
+            ydl_opts['http_headers'] = {
+                'Referer': referer,
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            }
 
         # Format selection
         if format_id:
