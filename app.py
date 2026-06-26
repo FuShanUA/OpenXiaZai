@@ -205,6 +205,7 @@ def _launch_playwright_context():
         "--disable-blink-features=AutomationControlled",
         "--no-first-run", "--no-default-browser-check",
         "--disable-dev-shm-usage",
+        "--no-proxy-server",
     ]
 
     if os.path.exists(chrome_profile):
