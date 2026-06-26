@@ -24,6 +24,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SAVE = os.path.expanduser("~/Downloads/OpenXiaZai")
 RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
 
+import logging
+LOG_FILE = os.path.join(BASE_DIR, "debug.log")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'),
+        logging.StreamHandler(),
+    ]
+)
+log = logging.getLogger("OpenXiaZai")
+
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
             static_folder=os.path.join(BASE_DIR, "static"))
 
@@ -3079,6 +3091,7 @@ class Engine:
         # For Douyin: yt-dlp needs fresh cookies that Playwright can't provide.
         # Use Playwright to intercept the aweme/v1/web/aweme/detail API response.
         if t == "douyin":
+            log.info("[_extract_yt_info] Douyin branch: launching Playwright for %s" % url[:100])
             try:
                 context, tmp_profile = _launch_playwright_context()
                 if context:
@@ -3089,9 +3102,16 @@ class Engine:
                         except Exception:
                             pass
                         result = _extract_douyin_from_page(page, url)
+                        log.info("[_extract_yt_info] Douyin result: ok=%s title=%s formats=%d url_field=%s" % (
+                            bool(result and result.get("ok")),
+                            str(result.get("title",""))[:40] if result else "None",
+                            len(result.get("formats",[])) if result and result.get("formats") else 0,
+                            "yes" if result and result.get("url") else "NO"))
                         if result and result.get("ok"):
                             result["yt_source"] = True
+                            log.info("[_extract_yt_info] Douyin SUCCESS, returning result")
                             return result
+                        log.warning("[_extract_yt_info] Douyin extraction returned no result, falling through")
                     finally:
                         _close_playwright_context(context, tmp_profile)
             except Exception:
@@ -3100,10 +3120,18 @@ class Engine:
         # For Kuaishou: yt-dlp doesn't support kuaishou.com URLs.
         # Use the mobile share page to extract video data.
         if t == "kuaishou":
+            log.info("[_extract_yt_info] Kuaishou branch: extracting for %s" % url[:100])
             result = _extract_kuaishou_info(url)
+            log.info("[_extract_yt_info] Kuaishou result: ok=%s title=%s formats=%d url_field=%s" % (
+                bool(result and result.get("ok")),
+                str(result.get("title",""))[:40] if result else "None",
+                len(result.get("formats",[])) if result and result.get("formats") else 0,
+                "yes" if result and result.get("url") else "NO"))
             if result and result.get("ok"):
                 result["yt_source"] = True
+                log.info("[_extract_yt_info] Kuaishou SUCCESS, returning result")
                 return result
+            log.warning("[_extract_yt_info] Kuaishou extraction failed, falling through")
 
         # For platforms that require cookies (iQiyi/MGTV/Tencent), try Playwright first
         # to get cookies from Chrome, then pass to yt-dlp
@@ -3297,6 +3325,7 @@ class Engine:
 
         # For Douyin/Kuaishou: extract a fresh direct URL before downloading
         t = classify(url) or ""
+        log.info("[_download_yt_thread] start gid=%s url=%s t=%s format_id=%s" % (gid, url[:100], t, format_id))
         if t in ("douyin", "kuaishou"):
             fresh_url = None
             if t == "kuaishou":
@@ -3324,8 +3353,11 @@ class Engine:
                 except Exception:
                     pass
             if fresh_url:
+                log.info("[_download_yt_thread] Got fresh URL for %s: %s" % (t, fresh_url[:100]))
                 url = fresh_url
                 format_id = None
+            else:
+                log.warning("[_download_yt_thread] No fresh URL for %s, using original: %s" % (t, url[:100]))
 
         def progress_hook(d):
             if gid not in self.yt_tasks:
@@ -3408,6 +3440,7 @@ class Engine:
                     if task.get('state') != 'error':
                         task['state'] = 'finished'
                         task['progress'] = 100
+                        log.info("[_download_yt_thread] DOWNLOAD FINISHED gid=%s output=%s" % (gid, task.get('output','')[:100]))
                         # Find actual output file
                         if not task.get('output') or not os.path.exists(task['output']):
                             for ext in ('.mp4', '.mkv', '.webm', '.mp3', '.m4a', '.opus'):
@@ -3426,6 +3459,7 @@ class Engine:
                     return
                 continue
         # All attempts failed
+        log.error("[_download_yt_thread] ALL ATTEMPTS FAILED for gid=%s: %s" % (gid, str(last_error)[:200]))
         if gid in self.yt_tasks:
             self.yt_tasks[gid]['state'] = 'error'
             self.yt_tasks[gid]['error'] = str(last_error)
@@ -3848,7 +3882,14 @@ def api_add():
     url = data.get("url", "").strip()
     if not url:
         return jsonify(ok=False, error="请输入链接"), 400
-    return jsonify(engine.add(url))
+    log.info("[API /api/add] url=%s" % url[:120])
+    result = engine.add(url)
+    log.info("[API /api/add] result: ok=%s type=%s title=%s formats=%d" % (
+        result.get('ok'), result.get('type',''), str(result.get('title',''))[:40],
+        len(result.get('formats', [])) if result.get('formats') else 0))
+    if not result.get('ok'):
+        log.warning("[API /api/add] FAILED: %s" % result.get('error',''))
+    return jsonify(result)
 
 
 @app.route("/api/ed2k_parse", methods=["POST"])
@@ -4027,10 +4068,13 @@ def api_download_yt():
     title = data.get("title", "").strip()
     format_id = data.get("format_id", "") or None
     is_audio_only = data.get("is_audio_only", False)
+    log.info("[API /api/download_yt] url=%s title=%s format_id=%s" % (url[:120], title[:40], format_id))
     if not url:
+        log.error("[API /api/download_yt] EMPTY URL! data=%s" % json.dumps(data, ensure_ascii=False)[:200])
         return jsonify(ok=False, error="请输入视频链接"), 400
     gid = engine.start_yt_download(url, format_id=format_id, title=title or "视频下载",
                                     is_audio_only=is_audio_only)
+    log.info("[API /api/download_yt] started gid=%s type=%s" % (gid, classify(url) or "yt_media"))
     return jsonify(ok=True, gid=gid, type=classify(url) or "yt_media")
 
 
