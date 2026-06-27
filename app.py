@@ -3467,7 +3467,7 @@ class Engine:
 
     def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False):
         """Start a YouTube/X video download. Returns gid."""
-        gid = f"yt_{self._yt_counter}"
+        gid = f"yt_{self._yt_counter}_{int(time.time())}"
         self._yt_counter += 1
         self.yt_tasks[gid] = {
             'url': url, 'title': title or '视频下载',
