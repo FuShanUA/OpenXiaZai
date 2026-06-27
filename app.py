@@ -387,61 +387,53 @@ def _get_cookies_via_playwright(url):
 
 def _extract_douyin_from_page(context, url):
     """Extract Douyin video info by intercepting the aweme/v1/web/aweme/detail
-    API response. Takes a Playwright context, creates a page, registers the
-    response listener BEFORE navigating (so we don't miss the API call that
-    happens during page load). Returns a dict or None."""
+    API response. First visits douyin.com homepage to get essential cookies
+    (ttwid, s_v_web_id), then navigates to the video page. The SPA won't
+    fire the detail API without these cookies. Returns a dict or None."""
     try:
         page = context.new_page()
         api_data = [None]
-        all_responses_count = [0]
-        api_url_seen = [None]
-        all_aweme_urls = []
 
         def handle_response(response):
             rurl = response.url
-            all_responses_count[0] += 1
-            if 'aweme' in rurl:
-                all_aweme_urls.append(rurl[:150])
             if 'aweme/v1/web/aweme/detail' in rurl:
-                api_url_seen[0] = rurl[:120]
                 try:
                     api_data[0] = response.json()
-                    log.info("[Douyin] aweme/detail API captured! status=%d aweme_detail=%s filter=%s" % (
-                        response.status,
-                        'present' if api_data[0].get('aweme_detail') else 'NULL',
-                        str(api_data[0].get('filter_detail', {}).get('filter_reason', ''))[:50]))
-                except Exception as e:
-                    log.warning("[Douyin] aweme/detail API response.json() failed: %s" % e)
+                    log.info("[Douyin] aweme/detail API captured! aweme_detail=%s" % (
+                        'present' if api_data[0].get('aweme_detail') else 'NULL'))
+                except Exception:
+                    pass
 
         page.on('response', handle_response)
-        log.info("[Douyin] listener registered, navigating to %s" % url[:80])
 
+        # Step 1: Visit homepage to get cookies (ttwid, s_v_web_id, etc.)
+        log.info("[Douyin] Step 1: visiting homepage for cookies...")
+        try:
+            page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(3000)
+        except Exception as e:
+            log.warning("[Douyin] homepage goto: %s" % str(e)[:80])
+
+        cookies = page.context.cookies()
+        cookie_names = [c.get('name','') for c in cookies if 'douyin' in c.get('domain','')]
+        log.info("[Douyin] cookies after homepage: %s" % ', '.join(cookie_names[:15]))
+
+        # Step 2: Navigate to video page (cookies are now set, SPA will fire API)
+        log.info("[Douyin] Step 2: navigating to video page %s" % url[:80])
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except Exception as e:
-            log.warning("[Douyin] page.goto error: %s" % str(e)[:100])
+            log.warning("[Douyin] video page goto: %s" % str(e)[:80])
 
-        log.info("[Douyin] page loaded, waiting 10s for API response...")
-        page.wait_for_timeout(10000)
+        # Wait for SPA to fire the detail API
+        page.wait_for_timeout(8000)
 
         try:
             page.remove_listener('response', handle_response)
         except Exception:
             pass
 
-        try:
-            log.info("[Douyin] page title: %s" % (page.title() or '')[:80])
-            log.info("[Douyin] page final URL: %s" % (page.url or '')[:120])
-            body_text = page.evaluate("() => document.body ? document.body.innerText.slice(0,300) : ''") or ''
-            log.info("[Douyin] body text: %s" % body_text[:200])
-        except Exception as e:
-            log.warning("[Douyin] could not read page state: %s" % str(e)[:100])
-
-        log.info("[Douyin] total responses: %d, aweme/detail seen: %s" % (
-            all_responses_count[0], 'yes' if api_url_seen[0] else 'NO'))
-        if all_aweme_urls:
-            for u in all_aweme_urls[:10]:
-                log.info("[Douyin]   aweme-url: %s" % u)
+        log.info("[Douyin] page title: %s" % (page.title() or '')[:60])
 
         detail = None
         if api_data[0] and isinstance(api_data[0], dict):
@@ -3136,6 +3128,7 @@ class Engine:
                 context, tmp_profile = _launch_playwright_context()
                 if context:
                     try:
+                        log.info("[_extract_yt_info] Calling _extract_douyin_from_page...")
                         result = _extract_douyin_from_page(context, url)
                         log.info("[_extract_yt_info] Douyin result: ok=%s title=%s formats=%d url_field=%s" % (
                             bool(result and result.get("ok")),
