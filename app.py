@@ -205,16 +205,18 @@ def _launch_playwright_context():
         "--disable-blink-features=AutomationControlled",
         "--no-first-run", "--no-default-browser-check",
         "--disable-dev-shm-usage",
-        "--no-proxy-server",
     ]
 
     if os.path.exists(chrome_profile):
         try:
+            log.info("[Playwright] Trying direct Chrome profile launch (args include --no-proxy-server: %s)" %
+                     ('--no-proxy-server' in STEALTH_ARGS))
             context = p.chromium.launch_persistent_context(
                 chrome_profile, headless=True, channel="chrome",
                 user_agent=STEALTH_UA,
                 args=STEALTH_ARGS,
             )
+            log.info("[Playwright] Direct Chrome profile OK")
         except Exception:
             tmp_profile = _tempfile.mkdtemp(prefix="chrome_profile_")
             try:
@@ -252,14 +254,16 @@ def _launch_playwright_context():
                         user_agent=STEALTH_UA,
                         args=STEALTH_ARGS,
                     )
+                    log.info("[Playwright] Temp profile OK (DX PW temp)")
                 except Exception:
                     if tmp_profile:
                         shutil.rmtree(tmp_profile, ignore_errors=True)
                         tmp_profile = None
 
     if not context:
+        log.warning("[Playwright] WARNING: Using fallback (no Chrome profile, no --no-proxy-server)!")
         try:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=True, args=STEALTH_ARGS)
             context = browser.new_context(user_agent=STEALTH_UA)
         except Exception:
             try:
@@ -381,30 +385,51 @@ def _get_cookies_via_playwright(url):
 
 
 
-def _extract_douyin_from_page(page, url):
-    """Extract Douyin video info from a rendered page using Playwright.
-    Douyin loads video via blob URLs (MSE), so we can't read the <video> src.
-    Instead we intercept the aweme/v1/web/aweme/detail API response, which
-    contains the full video metadata including direct mp4 URLs.
-    Returns a dict with video info, or None."""
+def _extract_douyin_from_page(context, url):
+    """Extract Douyin video info by intercepting the aweme/v1/web/aweme/detail
+    API response. Takes a Playwright context, creates a page, registers the
+    response listener BEFORE navigating (so we don't miss the API call that
+    happens during page load). Returns a dict or None."""
     try:
+        page = context.new_page()
         api_data = [None]
+        all_responses_count = [0]
+        api_url_seen = [None]
 
         def handle_response(response):
             rurl = response.url
+            all_responses_count[0] += 1
             if 'aweme/v1/web/aweme/detail' in rurl:
+                api_url_seen[0] = rurl[:120]
                 try:
                     api_data[0] = response.json()
-                except Exception:
-                    pass
+                    log.info("[Douyin] aweme/detail API captured! status=%d aweme_detail=%s filter=%s" % (
+                        response.status,
+                        'present' if api_data[0].get('aweme_detail') else 'NULL',
+                        str(api_data[0].get('filter_detail', {}).get('filter_reason', ''))[:50]))
+                except Exception as e:
+                    log.warning("[Douyin] aweme/detail API response.json() failed: %s" % e)
 
+        # Register listener BEFORE goto — critical! API fires during page load
         page.on('response', handle_response)
-        page.wait_for_timeout(6000)
+        log.info("[Douyin] listener registered, navigating to %s" % url[:80])
+
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            log.warning("[Douyin] page.goto error: %s" % str(e)[:100])
+
+        # Wait for SPA to initialize and fire the detail API
+        log.info("[Douyin] page loaded, waiting 10s for API response...")
+        page.wait_for_timeout(10000)
 
         try:
             page.remove_listener('response', handle_response)
         except Exception:
             pass
+
+        log.info("[Douyin] total responses intercepted: %d, aweme/detail seen: %s" % (
+            all_responses_count[0], 'yes' if api_url_seen[0] else 'NO'))
 
         detail = None
         if api_data[0] and isinstance(api_data[0], dict):
@@ -429,6 +454,7 @@ def _extract_douyin_from_page(page, url):
                     return
                 video_urls.append((rurl, cl))
 
+            log.info("[Douyin] Fallback: trying video stream interception...")
             page.on('response', handle_video_response)
             try:
                 page.click('video', timeout=3000)
@@ -440,6 +466,7 @@ def _extract_douyin_from_page(page, url):
             except Exception:
                 pass
 
+            log.info("[Douyin] Fallback found %d video stream URLs" % len(video_urls))
             if video_urls:
                 video_urls.sort(key=lambda x: x[1], reverse=True)
                 best_video_url = video_urls[0][0]
@@ -3097,12 +3124,7 @@ class Engine:
                 context, tmp_profile = _launch_playwright_context()
                 if context:
                     try:
-                        page = context.new_page()
-                        try:
-                            page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                        except Exception:
-                            pass
-                        result = _extract_douyin_from_page(page, url)
+                        result = _extract_douyin_from_page(context, url)
                         log.info("[_extract_yt_info] Douyin result: ok=%s title=%s formats=%d url_field=%s" % (
                             bool(result and result.get("ok")),
                             str(result.get("title",""))[:40] if result else "None",
@@ -3115,8 +3137,8 @@ class Engine:
                         log.warning("[_extract_yt_info] Douyin extraction returned no result, falling through")
                     finally:
                         _close_playwright_context(context, tmp_profile)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[_extract_yt_info] Douyin Playwright exception: %s" % str(e)[:200])
 
         # For Kuaishou: yt-dlp doesn't support kuaishou.com URLs.
         # Use the mobile share page to extract video data.
@@ -3341,12 +3363,7 @@ class Engine:
                     context, tmp_profile = _launch_playwright_context()
                     if context:
                         try:
-                            page = context.new_page()
-                            try:
-                                page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                            except Exception:
-                                pass
-                            fresh = _extract_douyin_from_page(page, url)
+                            fresh = _extract_douyin_from_page(context, url)
                             if fresh and fresh.get("ok"):
                                 fresh_url = fresh.get("m3u8_url", "")
                         finally:
