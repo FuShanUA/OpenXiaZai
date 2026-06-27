@@ -407,20 +407,38 @@ def _extract_douyin_from_page(context, url):
         page.on('response', handle_response)
 
         # Step 1: Visit homepage to get cookies (ttwid, s_v_web_id, etc.)
+        # s_v_web_id is set by JavaScript — poll until it appears
         log.info("[Douyin] Step 1: visiting homepage for cookies...")
         try:
             page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(3000)
         except Exception as e:
             log.warning("[Douyin] homepage goto: %s" % str(e)[:80])
 
-        cookies = page.context.cookies()
-        cookie_names = [c.get('name','') for c in cookies if 'douyin' in c.get('domain','')]
-        log.info("[Douyin] cookies after homepage: %s" % ', '.join(cookie_names[:15]))
+        # Wait for s_v_web_id cookie (needed for SPA to fire detail API)
+        got_webid = False
+        for _ in range(10):
+            page.wait_for_timeout(1000)
+            cookies = page.context.cookies()
+            cookie_names = [c.get('name','') for c in cookies if 'douyin' in c.get('domain','')]
+            if 's_v_web_id' in cookie_names:
+                got_webid = True
+                break
+        log.info("[Douyin] cookies: %s | s_v_web_id=%s" % (', '.join(cookie_names[:10]), got_webid))
 
-        # Step 2: Navigate to video page (cookies are now set, SPA will fire API)
-        # Use wait_until="commit" — returns immediately after navigation commit,
-        # so the response listener stays active during SPA initialization
+        if not got_webid:
+            log.warning("[Douyin] s_v_web_id not set after 10s, trying reload...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(3000)
+                cookies = page.context.cookies()
+                cookie_names = [c.get('name','') for c in cookies if 'douyin' in c.get('domain','')]
+                got_webid = 's_v_web_id' in cookie_names
+                log.info("[Douyin] after reload: s_v_web_id=%s" % got_webid)
+            except:
+                pass
+
+        # Step 2: Navigate to video page with wait_until="commit"
+        # so listener stays active during SPA initialization
         log.info("[Douyin] Step 2: navigating to video page %s" % url[:80])
         try:
             page.goto(url, wait_until="commit", timeout=20000)
