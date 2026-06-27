@@ -27,7 +27,7 @@ RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
 import logging
 LOG_FILE = os.path.join(BASE_DIR, "debug.log")
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'),
@@ -35,6 +35,9 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger("OpenXiaZai")
+# Suppress noisy HTTP request logs
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
             static_folder=os.path.join(BASE_DIR, "static"))
@@ -2625,16 +2628,22 @@ class Engine:
             state = info.get('state', 'downloading')
             output = info.get('output', '')
             if state == 'finished':
-                if gid not in existing:
-                    existing.add(gid)
-                    self.records["history"].insert(0, {
-                        "gid": gid, "type": info.get('type', 'yt_media'), "name": info.get('title', '视频下载'),
-                        "url": info.get('url', ''), "dir": self.save_path,
-                        "paths": [output] if output else [],
-                        "size": info.get('size', 0), "completed_at": int(time.time()),
-                    })
-                del self.yt_tasks[gid]
-                continue
+                # Keep finished task visible for 30s before moving to history
+                finished_at = info.get('_finished_at', 0)
+                if finished_at == 0:
+                    info['_finished_at'] = time.time()
+                    finished_at = info['_finished_at']
+                if time.time() - finished_at > 30:
+                    if gid not in existing:
+                        existing.add(gid)
+                        self.records["history"].insert(0, {
+                            "gid": gid, "type": info.get('type', 'yt_media'), "name": info.get('title', '视频下载'),
+                            "url": info.get('url', ''), "dir": self.save_path,
+                            "paths": [output] if output else [],
+                            "size": info.get('size', 0), "completed_at": int(finished_at),
+                        })
+                    del self.yt_tasks[gid]
+                    continue
             downloaded = info.get('_downloaded', 0)
             total = info.get('size', 0)
             pct = info.get('progress', 0)
