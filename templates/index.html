@@ -46,7 +46,7 @@ input[type=text]:focus{border-color:var(--accent)}
 .badge.yt_media{color:#ff5c5c}
 .badge.bilibili{color:#00a1d6}
 .badge.weibo{color:#ff5722}
-.badge.douyin{color:#161823}
+.badge.douyin{color:#ccc}
 .badge.tiktok{color:#fe2c55}
 .badge.facebook{color:#1877f2}
 .badge.spotify{color:#1db954}
@@ -55,7 +55,6 @@ input[type=text]:focus{border-color:var(--accent)}
 .badge.xiaohongshu{color:#fe2c55}
 .badge.ixigua{color:#ff6633}
 .badge.mgtv{color:#ff6d00}
-.badge.iqiyi{color:#00be06}
 .badge.tencent{color:#12b7f5}
 /* tabs */
 .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
@@ -363,7 +362,7 @@ window.onerror=function(msg,url,line,col,err){
 <script src="/static/qrcode.min.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",tencent:"腾讯视频"};
 const UNSUP={quark:1,cloud:1,thunder:1};
 let activeTab='tasks';
 let cur=null;
@@ -441,7 +440,7 @@ $('url').addEventListener('input',()=>{
   else if(/https?:\/\/(www\.|m\.)?(v\.qq\.com|film\.qq\.com)\//.test(v))t='tencent';
   else if(v.startsWith('http'))t='http';
   h.style.display='block';
-  const YT_TYPES=['yt_media','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','iqiyi','tencent'];
+  const YT_TYPES=['yt_media','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','tencent'];
   h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(YT_TYPES.includes(t)?' · 将使用 yt-dlp 下载':'')+(t==='bilibili'?' · 将使用B站API解析':'');
 });
 
@@ -529,8 +528,27 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
-  // yt-dlp 支持的更多平台（微博/抖音/TikTok/Facebook/Spotify/网易/快手/小红书/西瓜）
-  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|douyin\.com|v\.douyin\.com|iesdouyin\.com|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|m\.iqiyi\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
+  // 快手/抖音专用：使用 /api/add 走平台专用解析器
+  const KS_DY_PLATFORMS=/https?:\/\/(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com|kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com)\//;
+  if(KS_DY_PLATFORMS.test(v)){
+    $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
+    try{
+      const res=await post('/api/add',{url});
+      if(!res||res.ok===false){
+        const errMsg=res?.error||'获取视频信息失败';
+        const hint=res?.hint||'';
+        await customAlert(errMsg+(hint?'\n\n'+hint:''),{title:'获取失败'});
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      showYtPreview(res);
+    }catch(e){await customAlert('获取视频信息失败: '+e.message)}
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
+  // yt-dlp 支持的更多平台（微博/TikTok/Facebook/Spotify/网易/小红书/西瓜/芒果/腾讯）
+  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
   if(YT_PLATFORMS.test(v)){
     $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
     try{
@@ -720,9 +738,9 @@ document.addEventListener('keydown',e=>{
   if(e.key!=='Escape')return;
   const d=$('dropMenu');if(d.style.display==='block')d.style.display='none';
   if($('confirmOverlay').style.display==='flex'){$('confirmNo').click();return}
-  if($('cxPreview').style.display==='block'){hideCxPreview();return}
-  if($('ytPreview').style.display==='block'){hideYtPreview();return}
-  if($('biliPreview').style.display==='block'){hideBiliPreview();return}
+  if($('cxPreview').style.display==='block'){hideCxPreview()}
+  if($('ytPreview').style.display==='block'){hideYtPreview()}
+  if($('biliPreview').style.display==='block'){hideBiliPreview()}
   const gids=Object.keys(modalStates);
   if(gids.length>0){cancelModal(gids[gids.length-1],true)}
 });
@@ -730,7 +748,7 @@ document.addEventListener('keydown',e=>{
 // ---- 剪贴板监听（仅自动粘贴到输入框，不自动下载） ----
 (function(){
   let autoCooldown=false;
-  let lastText='';
+  window._clipLastText='';
   let lastDetectionTime=0;
   const LINK_RE=/^(magnet:|https?:\/\/|ftp:\/\/|sftp:\/\/|ed2k:\/\/|thunder:\/\/)|^(\/|~\/).*\.torrent$/i;  // also matches local .torrent file paths
   const CLIPBOARD_WINDOW_MS=30000;  // 30秒内复制的链接才响应
@@ -745,8 +763,8 @@ document.addEventListener('keydown',e=>{
   if($('biliPreview').style.display==='block')return;
     if($('confirmOverlay').style.display==='flex')return;
     if(document.activeElement===$('url')&&$('url').value===t)return;
-    if(t===lastText)return;
-    lastText=t;
+    if(t===window._clipLastText)return;
+    window._clipLastText=t;
     $('url').value=t;
     $('url').dispatchEvent(new Event('input'));
     $('url').focus();
@@ -765,7 +783,7 @@ document.addEventListener('keydown',e=>{
     if(autoCooldown)return;
     try{
       const t=await readClipboard();
-      if(t&&t.trim()!==lastText){lastDetectionTime=Date.now();tryAutoPaste(t)}
+      if(t&&t.trim()!==window._clipLastText){lastDetectionTime=Date.now();tryAutoPaste(t)}
     }catch(e){}
   }
   // 启动后延迟 2 秒再开始轮询，不在启动时检查现有剪贴板
@@ -814,7 +832,7 @@ function showCxPreview(data){
   $('cxPreview').style.display='block';
   $('url').value='';$('typeHint').style.display='none';
 }
-function hideCxPreview(){cxData=null;$('cxPreview').style.display='none';$('url').value=''}
+function hideCxPreview(){cxData=null;$('cxPreview').style.display='none';$('url').value='';window._clipLastText=''}
 async function doCxAdd(action){
   if(!cxData)return;
   const dl=action==='download';
@@ -842,7 +860,8 @@ let ytSelectedFormat=null;
 function showYtPreview(data){
   ytData=data;
   ytSelectedFormat=null;
-  const platformTag='<span class="badge yt_media" style="margin-left:6px">'+esc(data.platform||'YouTube/X')+'</span>';
+  const badgeCls='badge '+(data.type||'yt_media');
+  const platformTag='<span class="'+badgeCls+'" style="margin-left:6px">'+esc(data.platform||data.type||'YouTube/X')+'</span>';
   $('ytTitle').innerHTML=esc(data.title||'未知视频')+platformTag;
   // Meta line: uploader + duration
   let meta='';
@@ -920,7 +939,7 @@ function selectYtFormat(format_id,is_audio_only){
   ytSelectedFormat=format_id;
   ytData._selected_audio_only=is_audio_only;
 }
-function hideYtPreview(){ytData=null;ytSelectedFormat=null;$('ytPreview').style.display='none';$('url').value=''}
+function hideYtPreview(){ytData=null;ytSelectedFormat=null;$('ytPreview').style.display='none';$('url').value='';window._clipLastText=''}
 async function doYtDownload(audioOnly){
   if(!ytData)return;
   const formatId=audioOnly?null:ytSelectedFormat;
@@ -1102,7 +1121,7 @@ function updateBiliFormats(data){
   }
 }
 
-function hideBiliPreview(){biliData=null;$('biliPreview').style.display='none';$('url').value=''}
+function hideBiliPreview(){biliData=null;$('biliPreview').style.display='none';$('url').value='';window._clipLastText=''}
 async function doBiliDownload(audioOnly){
   if(!biliData)return;
   const fmt=biliData.formats||[];
