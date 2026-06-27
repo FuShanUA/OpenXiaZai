@@ -386,36 +386,26 @@ def _get_cookies_via_playwright(url):
 
 
 def _extract_douyin_from_page(context, url):
-    """Extract Douyin video info by intercepting the aweme/v1/web/aweme/detail
-    API response. First visits douyin.com homepage to get essential cookies
-    (ttwid, s_v_web_id), then navigates to the video page. The SPA won't
-    fire the detail API without these cookies. Returns a dict or None."""
+    """Extract Douyin video info. Visits homepage to get cookies + load
+    webmssdk (signing SDK), then uses page.evaluate fetch() to call the
+    detail API directly. webmssdk automatically adds a_bogus/msToken signing.
+    More reliable than intercepting the SPA's own API call."""
+    import json as _json
+    import re as _re
+
     try:
         page = context.new_page()
-        api_data = [None]
 
-        def handle_response(response):
-            rurl = response.url
-            if 'aweme/v1/web/aweme/detail' in rurl:
-                try:
-                    api_data[0] = response.json()
-                    log.info("[Douyin] aweme/detail API captured! aweme_detail=%s" % (
-                        'present' if api_data[0].get('aweme_detail') else 'NULL'))
-                except Exception:
-                    pass
-
-        page.on('response', handle_response)
-
-        # Step 1: Visit homepage to get cookies (ttwid, s_v_web_id, etc.)
-        # s_v_web_id is set by JavaScript — poll until it appears
-        log.info("[Douyin] Step 1: visiting homepage for cookies...")
+        # Step 1: Visit homepage to get cookies + load webmssdk
+        log.info("[Douyin] Visiting homepage for cookies + webmssdk...")
         try:
             page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=15000)
         except Exception as e:
             log.warning("[Douyin] homepage goto: %s" % str(e)[:80])
 
-        # Wait for s_v_web_id cookie (needed for SPA to fire detail API)
+        # Wait for s_v_web_id cookie (needed for API signing)
         got_webid = False
+        cookie_names = []
         for _ in range(10):
             page.wait_for_timeout(1000)
             cookies = page.context.cookies()
@@ -423,98 +413,57 @@ def _extract_douyin_from_page(context, url):
             if 's_v_web_id' in cookie_names:
                 got_webid = True
                 break
-        log.info("[Douyin] cookies: %s | s_v_web_id=%s" % (', '.join(cookie_names[:10]), got_webid))
+        log.info("[Douyin] s_v_web_id=%s, cookies: %s" % (got_webid, ', '.join(cookie_names[:8])))
 
-        if not got_webid:
-            log.warning("[Douyin] s_v_web_id not set after 10s, trying reload...")
-            try:
-                page.reload(wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(3000)
-                cookies = page.context.cookies()
-                cookie_names = [c.get('name','') for c in cookies if 'douyin' in c.get('domain','')]
-                got_webid = 's_v_web_id' in cookie_names
-                log.info("[Douyin] after reload: s_v_web_id=%s" % got_webid)
-            except:
-                pass
+        # Step 2: Extract aweme_id from URL
+        m = _re.search(r'/video/(\d+)', url)
+        if not m:
+            m = _re.search(r'/note/(\d+)', url)
+        if not m:
+            log.warning("[Douyin] Cannot extract aweme_id from %s" % url[:80])
+            return None
+        aweme_id = m.group(1)
+        log.info("[Douyin] aweme_id=%s, calling API via fetch..." % aweme_id)
 
-        # Step 2: Navigate to video page with wait_until="commit"
-        # so listener stays active during SPA initialization
-        log.info("[Douyin] Step 2: navigating to video page %s" % url[:80])
-        try:
-            page.goto(url, wait_until="commit", timeout=20000)
-        except Exception as e:
-            log.warning("[Douyin] video page goto: %s" % str(e)[:80])
+        # Step 3: Call the detail API via page.evaluate fetch()
+        # webmssdk patches fetch() to automatically add a_bogus + msToken
+        js_code = """
+        async () => {
+            const params = new URLSearchParams({
+                aweme_id: "%s",
+                device_platform: "webapp", aid: "6383", channel: "channel_pc_web",
+                pc_client_type: "1", version_code: "170400", update_version_code: "170400",
+                cover_format: "0", support_h265: "1", support_dash: "1",
+            });
+            try {
+                const r = await fetch("/aweme/v1/web/aweme/detail/?" + params.toString());
+                const text = await r.text();
+                return {status: r.status, body: text};
+            } catch(e) { return {error: e.message}; }
+        }
+        """ % aweme_id
 
-        # Wait for SPA to fire the detail API
-        page.wait_for_timeout(8000)
+        result = page.evaluate(js_code)
 
-        try:
-            page.remove_listener('response', handle_response)
-        except Exception:
-            pass
-
-        log.info("[Douyin] page title: %s" % (page.title() or '')[:60])
-
-        detail = None
-        if api_data[0] and isinstance(api_data[0], dict):
-            detail = api_data[0].get('aweme_detail')
-
-        if not detail:
-            video_urls = []
-
-            def handle_video_response(response):
-                ct = response.headers.get('content-type', '')
-                if 'video' not in ct:
-                    return
-                rurl = response.url
-                if 'douyinstatic' in rurl:
-                    return
-                cl = 0
-                try:
-                    cl = int(response.headers.get('content-length', '0') or '0')
-                except Exception:
-                    pass
-                if cl < 100000:
-                    return
-                video_urls.append((rurl, cl))
-
-            log.info("[Douyin] Fallback: trying video stream interception...")
-            page.on('response', handle_video_response)
-            try:
-                page.click('video', timeout=3000)
-                page.wait_for_timeout(5000)
-            except Exception:
-                pass
-            try:
-                page.remove_listener('response', handle_video_response)
-            except Exception:
-                pass
-
-            log.info("[Douyin] Fallback found %d video stream URLs" % len(video_urls))
-            if video_urls:
-                video_urls.sort(key=lambda x: x[1], reverse=True)
-                best_video_url = video_urls[0][0]
-                title = page.evaluate(
-                    "() => { const t = document.title || '';"
-                    " return t.replace(/\\s*-\\s*抖音\\s*$/, ''.trim(); }"
-                ) or ""
-                poster = page.evaluate(
-                    '() => { const v = document.querySelector("video[poster]");'
-                    ' if (v && v.poster) return v.poster;'
-                    ' const og = document.querySelector("meta[property=\"og:image\"]");'
-                    ' return og ? og.content || "" : ""; }'
-                ) or ""
-                return {
-                    "ok": True,
-                    "title": title or "抖音视频",
-                    "poster": poster,
-                    "m3u8_url": best_video_url,
-                    "magnet": "",
-                    "type": "douyin",
-                    "url": url,
-                }
+        if not result or result.get('error'):
+            log.warning("[Douyin] fetch error: %s" % str(result.get('error',''))[:100])
             return None
 
+        if result.get('status') != 200 or not result.get('body'):
+            log.warning("[Douyin] API returned status=%s body_len=%d" % (
+                result.get('status'), len(result.get('body',''))))
+            return None
+
+        data = _json.loads(result['body'])
+        detail = data.get('aweme_detail')
+        if not detail:
+            log.warning("[Douyin] aweme_detail is null, filter=%s" % (
+                str(data.get('filter_detail', {}).get('filter_reason', ''))[:50]))
+            return None
+
+        log.info("[Douyin] Got video data! desc=%s" % str(detail.get('desc',''))[:40])
+
+        # Parse video info
         video = detail.get('video', {}) or {}
         play_addr = video.get('play_addr', {}) or {}
         play_urls = play_addr.get('url_list', []) or []
@@ -532,6 +481,7 @@ def _extract_douyin_from_page(context, url):
 
         best_video_url = play_urls[0]
 
+        # Build format list
         formats = []
         seen_urls = set()
         bit_rate = video.get('bit_rate', []) or []
@@ -568,13 +518,11 @@ def _extract_douyin_from_page(context, url):
         desc = (detail.get('desc', '') or '').strip()
         title = desc or ''
         author = (detail.get('author', {}) or {}).get('nickname', '') or ''
-
         cover = (video.get('cover', {}) or {}).get('url_list', []) or []
         poster = cover[0] if cover else ''
         if not poster:
             origin_cover = (video.get('origin_cover', {}) or {}).get('url_list', []) or []
             poster = origin_cover[0] if origin_cover else ''
-
         duration = (video.get('duration', 0) or 0) // 1000
 
         return {
@@ -584,7 +532,8 @@ def _extract_douyin_from_page(context, url):
             "formats": formats, "url": url,
         }
 
-    except Exception:
+    except Exception as e:
+        log.warning("[Douyin] exception: %s" % str(e)[:200])
         return None
 
 
