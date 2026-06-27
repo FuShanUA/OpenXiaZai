@@ -395,10 +395,13 @@ def _extract_douyin_from_page(context, url):
         api_data = [None]
         all_responses_count = [0]
         api_url_seen = [None]
+        all_aweme_urls = []
 
         def handle_response(response):
             rurl = response.url
             all_responses_count[0] += 1
+            if 'aweme' in rurl:
+                all_aweme_urls.append(rurl[:150])
             if 'aweme/v1/web/aweme/detail' in rurl:
                 api_url_seen[0] = rurl[:120]
                 try:
@@ -410,7 +413,6 @@ def _extract_douyin_from_page(context, url):
                 except Exception as e:
                     log.warning("[Douyin] aweme/detail API response.json() failed: %s" % e)
 
-        # Register listener BEFORE goto — critical! API fires during page load
         page.on('response', handle_response)
         log.info("[Douyin] listener registered, navigating to %s" % url[:80])
 
@@ -419,7 +421,6 @@ def _extract_douyin_from_page(context, url):
         except Exception as e:
             log.warning("[Douyin] page.goto error: %s" % str(e)[:100])
 
-        # Wait for SPA to initialize and fire the detail API
         log.info("[Douyin] page loaded, waiting 10s for API response...")
         page.wait_for_timeout(10000)
 
@@ -428,8 +429,19 @@ def _extract_douyin_from_page(context, url):
         except Exception:
             pass
 
-        log.info("[Douyin] total responses intercepted: %d, aweme/detail seen: %s" % (
+        try:
+            log.info("[Douyin] page title: %s" % (page.title() or '')[:80])
+            log.info("[Douyin] page final URL: %s" % (page.url or '')[:120])
+            body_text = page.evaluate("() => document.body ? document.body.innerText.slice(0,300) : ''") or ''
+            log.info("[Douyin] body text: %s" % body_text[:200])
+        except Exception as e:
+            log.warning("[Douyin] could not read page state: %s" % str(e)[:100])
+
+        log.info("[Douyin] total responses: %d, aweme/detail seen: %s" % (
             all_responses_count[0], 'yes' if api_url_seen[0] else 'NO'))
+        if all_aweme_urls:
+            for u in all_aweme_urls[:10]:
+                log.info("[Douyin]   aweme-url: %s" % u)
 
         detail = None
         if api_data[0] and isinstance(api_data[0], dict):
