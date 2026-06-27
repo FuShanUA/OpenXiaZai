@@ -419,9 +419,11 @@ def _extract_douyin_from_page(context, url):
         log.info("[Douyin] cookies after homepage: %s" % ', '.join(cookie_names[:15]))
 
         # Step 2: Navigate to video page (cookies are now set, SPA will fire API)
+        # Use wait_until="commit" — returns immediately after navigation commit,
+        # so the response listener stays active during SPA initialization
         log.info("[Douyin] Step 2: navigating to video page %s" % url[:80])
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            page.goto(url, wait_until="commit", timeout=20000)
         except Exception as e:
             log.warning("[Douyin] video page goto: %s" % str(e)[:80])
 
