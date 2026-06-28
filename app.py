@@ -3568,7 +3568,7 @@ class Engine:
             except Exception:
                 pass
 
-    def _download_yt_thread(self, gid, url, format_id, title):
+    def _download_yt_thread(self, gid, url, format_id, title, stream_data=None):
         """Download YouTube/X video in background thread using yt-dlp."""
         import yt_dlp
 
@@ -3617,9 +3617,9 @@ class Engine:
         # iQiyi / Tencent: dedicated Playwright-intercept downloaders (yt-dlp extractors broken)
         if t in ("iqiyi", "tencent"):
             if t == "iqiyi":
-                self._download_iqiyi_thread(gid, url, title)
+                self._download_iqiyi_thread(gid, url, title, stream_data=stream_data)
             else:
-                self._download_tencent_thread(gid, url, format_id, title)
+                self._download_tencent_thread(gid, url, format_id, title, stream_data=stream_data)
             return
 
         def progress_hook(d):
@@ -3742,7 +3742,7 @@ class Engine:
             self.yt_tasks[gid]['state'] = 'error'
             self.yt_tasks[gid]['error'] = str(last_error)
 
-    def _download_iqiyi_thread(self, gid, url, title):
+    def _download_iqiyi_thread(self, gid, url, title, stream_data=None):
         """爱奇艺下载：重新抓 TS 分片，curl 逐段下载（带 referer/cookie），ffmpeg 合并。"""
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '爱奇艺视频'
         info = self.yt_tasks.get(gid, {})
@@ -3750,12 +3750,16 @@ class Engine:
                      'download_rate': 0, 'output': '', 'type': 'iqiyi'})
         self.yt_tasks[gid] = info
 
-        st = _grab_stream_subprocess('iqiyi', url) or {}
+        # 优先用预抓的流数据（api_download_yt 同步抓的），避免后台线程启动 chromium
+        if stream_data:
+            st = stream_data
+        else:
+            st = _grab_stream_subprocess('iqiyi', url) or {}
         segs = st.get('segs', []) or []
         cookies = st.get('cookies', []) or []
 
         # 首次抓流失败时重试一次（chromium 残留进程可能干扰首次启动）
-        if not segs:
+        if not stream_data and not segs:
             log.warning("[iQiyi dl] first grab failed, retrying after cleanup...")
             time.sleep(2)
             st = _grab_stream_subprocess('iqiyi', url) or {}
@@ -3831,7 +3835,7 @@ class Engine:
         finally:
             self._cleanup_seg_dir(seg_dir)
 
-    def _download_tencent_thread(self, gid, url, format_id, title):
+    def _download_tencent_thread(self, gid, url, format_id, title, stream_data=None):
         """腾讯视频下载：重新抓 proxyhttp 取 m3u8，curl 逐段下载（带 referer/cookie），ffmpeg 合并。"""
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '腾讯视频'
         info = self.yt_tasks.get(gid, {})
@@ -3839,12 +3843,16 @@ class Engine:
                      'download_rate': 0, 'output': '', 'type': 'tencent'})
         self.yt_tasks[gid] = info
 
-        st = _grab_stream_subprocess('tencent', url) or {}
+        # 优先用预抓的流数据（api_download_yt 同步抓的），避免后台线程启动 chromium
+        if stream_data:
+            st = stream_data
+        else:
+            st = _grab_stream_subprocess('tencent', url) or {}
         proxy_body = st.get('proxy')
         cookies = st.get('cookies', []) or []
 
         # 首次抓流失败时重试一次（chromium 残留进程可能干扰首次启动）
-        if not proxy_body:
+        if not stream_data and not proxy_body:
             log.warning("[Tencent dl] first grab failed, retrying after cleanup...")
             time.sleep(2)
             st = _grab_stream_subprocess('tencent', url) or {}
@@ -3993,7 +4001,7 @@ class Engine:
         new_gid = self.start_yt_download(url, format_id=format_id, title=title)
         return new_gid
 
-    def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False):
+    def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False, stream_data=None):
         """Start a YouTube/X video download. Returns gid."""
         gid = f"yt_{self._yt_counter}_{int(time.time())}"
         self._yt_counter += 1
@@ -4002,12 +4010,12 @@ class Engine:
             'type': classify(url),  # 正确的平台类型 (weibo/douyin/etc)
             'state': 'downloading', 'progress': 0,
             'size': 0, 'download_rate': 0, 'format_id': format_id,
-            'output': '', '_is_audio_only': is_audio_only,
+            'output': '', '_is_audio_only': is_audio_only, '_stream_data': stream_data,
             '_downloaded': 0, '_eta': 0,
             'added_at': time.time(),
         }
         t = threading.Thread(target=self._download_yt_thread,
-                             args=(gid, url, format_id, title or '视频下载'),
+                             args=(gid, url, format_id, title or '视频下载'), kwargs={'stream_data': stream_data},
                              daemon=True)
         t.start()
         return gid
@@ -4608,8 +4616,19 @@ def api_download_yt():
     if not url:
         log.error("[API /api/download_yt] EMPTY URL! data=%s" % json.dumps(data, ensure_ascii=False)[:200])
         return jsonify(ok=False, error="请输入视频链接"), 400
+    # 爱奇艺/腾讯视频：在请求线程里同步抓流（chromium 只在工作线程跑，已验证稳定），
+    # 把流数据传给后台下载线程，避免后台线程启动 chromium 导致 waitress 进程崩溃。
+    t = classify(url) or ""
+    stream_data = None
+    if t in ("iqiyi", "tencent"):
+        platform = "iqiyi" if t == "iqiyi" else "tencent"
+        log.info("[API /api/download_yt] pre-grabbing stream for %s..." % platform)
+        stream_data = _grab_stream_subprocess(platform, url)
+        if not stream_data or stream_data.get("error"):
+            err = (stream_data or {}).get("error", "抓流失败") if stream_data else "抓流失败"
+            return jsonify(ok=False, error=err, type=t), 200
     gid = engine.start_yt_download(url, format_id=format_id, title=title or "视频下载",
-                                    is_audio_only=is_audio_only)
+                                    is_audio_only=is_audio_only, stream_data=stream_data)
     log.info("[API /api/download_yt] started gid=%s type=%s" % (gid, classify(url) or "yt_media"))
     return jsonify(ok=True, gid=gid, type=classify(url) or "yt_media")
 
@@ -4861,4 +4880,11 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  磁力/P2P/HTTP 下载器已启动:  http://127.0.0.1:5566")
     print("=" * 60)
-    app.run(host="127.0.0.1", port=5566, debug=False, threaded=True)
+    # 用 waitress（生产级 WSGI）替代 Flask 开发服务器：
+    # Flask 开发服务器在处理 grab_stream 子进程（Playwright）的长请求时会静默崩溃，
+    # waitress 的线程模型更稳定，能扛住长时间阻塞请求 + 子进程管理。
+    try:
+        from waitress import serve
+        serve(app, host="127.0.0.1", port=5566, threads=8)
+    except ImportError:
+        app.run(host="127.0.0.1", port=5566, debug=False, threaded=True)

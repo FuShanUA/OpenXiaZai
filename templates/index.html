@@ -561,7 +561,7 @@ $('addBtn').onclick=async()=>{
   }
 
   // yt-dlp 支持的更多平台（微博/TikTok/Facebook/Spotify/网易/小红书/西瓜/芒果/爱奇艺/腾讯）
-  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
+  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|qy\.net|v\.qq\.com|film\.qq\.com|t\.cn)\//;
   if(YT_PLATFORMS.test(v)){
     $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
     try{

@@ -220,8 +220,7 @@ if __name__ == '__main__':
     except Exception as e:
         sys.stdout.write(json.dumps({'error': str(e)[:200]}, ensure_ascii=False) + '\n')
         sys.stdout.flush()
-    try:
-        os.killpg(os.getpgid(0), signal.SIGKILL)
-    except Exception:
-        pass
+    # 只用 os._exit 退出，不用 killpg（os.getpgid(0) 在 start_new_session 未生效时
+    # 可能返回父进程的 pgid，killpg 会误杀 Flask 主进程）。残留 chromium 由
+    # _cleanup_chromium 在下次抓流前清理。
     os._exit(0)
