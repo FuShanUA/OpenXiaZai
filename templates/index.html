@@ -1541,7 +1541,11 @@ function renderTask(t){
   }
   html+='<div class="row" style="margin-top:10px">';
   if(t.state==='downloading'||t.state==='fetching'||t.state==='queued'){
-    html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
+    if(t.gid&&t.gid.startsWith('yt_')){
+      html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止</button>';
+    }else{
+      html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
+    }
   }
   if(t.state==='paused'){
     html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">开始</button>';

@@ -2739,22 +2739,40 @@ class Engine:
                 paths = rec.get("paths", [])
                 file_exists = any(os.path.exists(p) for p in paths)
                 if file_exists:
-                    # 文件存在 → 已下载完成，恢复到下载记录
+                    # File exists -> completed download, restore to history
                     self.records["history"].insert(0, rec)
                     self._save_records()
                     return {"action": "history", "ok": True}
                 else:
-                    # 文件不存在 → 未下载完成，重新添加到下载队列
+                    # File doesn't exist -> incomplete, restart download
                     url = rec.get("url", "")
-                    if url:
-                        result = self.add(url)
-                        self._save_records()
-                        return {"action": "task", "ok": result.get("ok", False),
-                                "gid": result.get("gid"), "type": result.get("type")}
-                    else:
+                    title = rec.get("name", "视频下载")
+                    rtype = rec.get("type", "")
+                    if not url:
                         self.records["history"].insert(0, rec)
                         self._save_records()
                         return {"action": "history", "ok": True}
+                    # For yt-dlp types, start download directly (not preview)
+                    yt_types = {"weibo", "douyin", "tiktok", "facebook", "spotify",
+                                "netease", "kuaishou", "xiaohongshu", "ixigua",
+                                "mgtv", "tencent"}
+                    if rtype in yt_types:
+                        new_gid = self.start_yt_download(url, title=title)
+                        self._save_records()
+                        return {"action": "task", "ok": True,
+                                "gid": new_gid, "type": rtype}
+                    else:
+                        result = self.add(url)
+                        self._save_records()
+                        if result.get("ok"):
+                            return {"action": "task", "ok": True,
+                                    "gid": result.get("gid"), "type": result.get("type")}
+                        else:
+                            # Add failed, put record back in trash
+                            self.records["trash"].insert(0, rec)
+                            self._save_records()
+                            return {"action": "error", "ok": False,
+                                    "error": result.get("error", "恢复失败")}
         return {"ok": False}
 
     def purge(self, gid, delete_files=True):
