@@ -368,7 +368,7 @@ window.onerror=function(msg,url,line,col,err){
 <script src="/static/qrcode.min.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",tencent:"腾讯视频"};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
 const UNSUP={quark:1,cloud:1,thunder:1};
 let activeTab='tasks';
 let cur=null;
@@ -446,7 +446,7 @@ $('url').addEventListener('input',()=>{
   else if(/https?:\/\/(www\.|m\.)?(v\.qq\.com|film\.qq\.com)\//.test(v))t='tencent';
   else if(v.startsWith('http'))t='http';
   h.style.display='block';
-  const YT_TYPES=['yt_media','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','tencent'];
+  const YT_TYPES=['yt_media','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','iqiyi','tencent'];
   h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(YT_TYPES.includes(t)?' · 将使用 yt-dlp 下载':'')+(t==='bilibili'?' · 将使用B站API解析':'');
 });
 
@@ -554,8 +554,8 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
-  // yt-dlp 支持的更多平台（微博/TikTok/Facebook/Spotify/网易/小红书/西瓜/芒果/腾讯）
-  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
+  // yt-dlp 支持的更多平台（微博/TikTok/Facebook/Spotify/网易/小红书/西瓜/芒果/爱奇艺/腾讯）
+  const YT_PLATFORMS=/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|v\.qq\.com|film\.qq\.com|t\.cn)\//;
   if(YT_PLATFORMS.test(v)){
     $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
     try{

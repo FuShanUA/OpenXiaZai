@@ -208,6 +208,9 @@ def _launch_playwright_context():
         "--disable-blink-features=AutomationControlled",
         "--no-first-run", "--no-default-browser-check",
         "--disable-dev-shm-usage",
+        # 自适应代理：禁用 Chromium 读取系统代理。普通代理模式下走直连，
+        # TUN 模式（Clash）无法在应用层禁用，但国内域名由 Clash 直连规则兜底。
+        "--no-proxy-server",
     ]
 
     if os.path.exists(chrome_profile):
@@ -278,6 +281,38 @@ def _launch_playwright_context():
     context._pw = p
     return context, tmp_profile
 
+
+
+def _launch_lightweight_browser():
+    """启动轻量 Playwright 浏览器（不复用 Chrome profile，不带 channel）。
+    用于爱奇艺/腾讯视频抓流：免费内容/试看片段无需登录态，轻量启动更稳定，
+    不会因本机 Chrome 已运行而冲突卡死。可被 _close_playwright_context 清理。
+    自适应代理：args 含 --no-proxy-server。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None, None
+    try:
+        p = sync_playwright().start()
+        UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        browser = p.chromium.launch(headless=True, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-dev-shm-usage", "--no-sandbox",
+            "--no-proxy-server",
+        ])
+        context = browser.new_context(user_agent=UA)
+        context._pw = p
+        context._browser = browser
+        return context, None
+    except Exception as e:
+        log.warning("[Playwright-light] launch failed: %s" % str(e)[:200])
+        try:
+            p.stop()
+        except Exception:
+            pass
+        return None, None
 
 def _close_playwright_context(context, tmp_profile):
     """Close Playwright context and clean up temp profile."""
@@ -757,7 +792,7 @@ def _extract_with_playwright(url):
                         chrome_profile,
                         headless=True,
                         channel="chrome",
-                        args=["--disable-blink-features=AutomationControlled"],
+                        args=["--disable-blink-features=AutomationControlled", "--no-proxy-server"],
                     )
                 except Exception:
                     # Chrome is running -> copy profile to temp dir
@@ -780,13 +815,13 @@ def _extract_with_playwright(url):
                             tmp_profile,
                             headless=True,
                             channel="chrome",
-                            args=["--disable-blink-features=AutomationControlled"],
+                            args=["--disable-blink-features=AutomationControlled", "--no-proxy-server"],
                         )
                     except Exception:
                         pass
 
             if not context:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(headless=True, args=["--no-proxy-server"])
                 context = browser.new_context()
 
             # Intercept network responses to capture video URLs
@@ -795,12 +830,19 @@ def _extract_with_playwright(url):
                 # Capture m3u8 manifests (highest priority — adaptive bitrate)
                 if '.m3u8' in resp_url:
                     video_urls.append(("m3u8", resp_url))
-                # Capture mp4/webm video streams (must be > 500KB to be real video, not a thumbnail)
-                elif any(ext in resp_url for ext in ['.mp4', '.webm']):
+                # Capture mp4/webm video streams. Use content-type when available
+                # (chunked/segmented streams often have no content-length or < 500KB),
+                # fall back to URL extension for direct media files.
+                elif any(ext in resp_url for ext in ['.mp4', '.webm', '.ts']):
                     try:
-                        cl = int(response.headers.get("content-length", "0") or "0")
-                        if cl > 500000:  # > 500KB = likely video stream
+                        ct = (response.headers.get("content-type", "") or "").lower()
+                        if "video" in ct or "audio" in ct or "mp2t" in ct:
                             video_urls.append(("direct", resp_url))
+                        else:
+                            # No content-type hint — still capture if it looks like a media path
+                            cl = int(response.headers.get("content-length", "0") or "0")
+                            if cl > 500000:
+                                video_urls.append(("direct", resp_url))
                     except Exception:
                         video_urls.append(("direct", resp_url))
 
@@ -808,13 +850,10 @@ def _extract_with_playwright(url):
             page.on("response", handle_response)
 
             try:
-                page.goto(url, wait_until="networkidle", timeout=20000)
+                page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(5000)
             except Exception:
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                    page.wait_for_timeout(5000)
-                except Exception:
-                    pass
+                pass
 
             # Extract title from the rendered page
             try:
@@ -908,6 +947,165 @@ def _extract_title_from_url(url):
     path = urlparse(url).path.rstrip('/')
     segments = path.split('/')
     return segments[-1] if segments else "视频"
+
+
+
+
+
+def _cleanup_chromium():
+    """清理残留的 Chromium/Playwright 子进程，避免堆积导致新进程启动卡死。"""
+    try:
+        # 只清 Playwright 启动的 headless shell（路径含 ms-playwright），
+        # 避免误杀用户的 Google Chrome / 其它浏览器。
+        out = subprocess.run(['pgrep', '-f', 'ms-playwright.*chrome-headless-shell'],
+                             capture_output=True, text=True, timeout=3).stdout
+        for pid in out.split():
+            try:
+                os.kill(int(pid), 9)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    except Exception:
+        pass
+
+
+def _grab_stream_subprocess(platform, url):
+    """调用 grab_stream.py 子进程抓流，返回解析后的 dict 或 None。
+    子进程隔离避免 Playwright 崩溃影响 Flask 主进程。"""
+    _cleanup_chromium()
+    script = os.path.join(BASE_DIR, 'grab_stream.py')
+    try:
+        # 用 Popen + start_new_session 而非 subprocess.run：chromium 孙进程会继承
+        # pipe fd 导致 communicate() 卡死等不到 EOF。start_new_session 让子进程独立
+        # 成会话，轮询读 stdout 拿到结果后 killpg 杀整个进程组（含 chromium）。
+        import signal
+        proc = subprocess.Popen(
+            [sys.executable, script, platform, url],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True, text=True)
+        result_line = None
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if line:
+                result_line = line.strip()
+                break
+            if proc.poll() is not None:
+                rest = proc.stdout.read()
+                if rest.strip():
+                    result_line = rest.strip()
+                break
+            time.sleep(0.3)
+        # 拿到结果后杀整个进程组（含 chromium 孙进程），避免 os._exit 漏掉子进程。
+        # start_new_session=True 保证 proc.pid 就是进程组长，killpg 只影响这个组，
+        # 不会误杀主进程。grab_stream.py 自己也会 killpg 自杀，这里双保险。
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if result_line:
+            try:
+                return json.loads(result_line)
+            except Exception as e:
+                log.warning("[%s] grab_stream JSON parse failed: %s" % (platform, str(e)[:100]))
+        else:
+            log.warning("[%s] grab_stream timeout (60s)" % platform)
+    except Exception as e:
+        log.warning("[%s] grab_stream error: %s" % (platform, str(e)[:150]))
+    return None
+
+
+def _extract_iqiyi_info(url):
+    """爱奇艺视频提取：子进程 Playwright 拦截 TS 分片直链。
+    yt-dlp 的 iqiyi 提取器长期失效，这里自行抓流。"""
+    import json as _json
+    st = _grab_stream_subprocess('iqiyi', url)
+    if not st:
+        return None
+    if st.get('error'):
+        return {"ok": False, "error": "抓流失败: " + st['error'], "type": "iqiyi", "url": url}
+    segs = st.get('segs', []) or []
+    if not segs:
+        return {"ok": False, "error": "未抓取到视频分片（内容可能已下架或需登录）",
+                "type": "iqiyi", "url": url,
+                "hint": "若链接有效但无法观看，可能是地域限制或 VIP 内容。"}
+    is_vip = bool(st.get('vip'))
+    formats = [{'format_id': 'default', 'label': '标清试看' if is_vip else '默认',
+                'ext': 'mp4', 'is_video_audio': True,
+                'is_video_only': False, 'is_audio_only': False}]
+    return {
+        "ok": True, "type": "iqiyi", "title": st.get('title') or '爱奇艺视频',
+        "poster": st.get('poster', ''), "m3u8_url": "", "magnet": "",
+        "duration": 0, "uploader": '',
+        "platform": '爱奇艺' + ('·VIP试看' if is_vip else ''),
+        "formats": formats, "url": url, "vip": is_vip,
+        "hint": "VIP 内容仅可下载免费试看片段，完整版需登录态。" if is_vip else '',
+    }
+
+
+def _extract_tencent_info(url):
+    """腾讯视频提取：子进程 Playwright 拦截 proxyhttp 接口，解析清晰度与 m3u8 直链。"""
+    import json as _json
+    st = _grab_stream_subprocess('tencent', url)
+    if not st:
+        return None
+    if st.get('error'):
+        return {"ok": False, "error": "抓流失败: " + st['error'], "type": "tencent", "url": url}
+    proxy_body = st.get('proxy')
+    if not proxy_body:
+        return {"ok": False, "error": "未抓取到视频流接口（内容可能已下架）",
+                "type": "tencent", "url": url,
+                "hint": "腾讯视频部分内容有地域/下架限制，请换一个有效链接重试。"}
+    try:
+        outer = _json.loads(proxy_body)
+        vinfo_raw = outer.get('vinfo', '') or '{}'
+        vinfo = _json.loads(vinfo_raw) if isinstance(vinfo_raw, str) else vinfo_raw
+    except Exception as e:
+        log.warning("[Tencent] parse proxyhttp failed: %s" % str(e)[:120])
+        return {"ok": False, "error": "视频流接口解析失败", "type": "tencent", "url": url}
+
+    fi_list = (vinfo.get('fl', {}) or {}).get('fi', []) or []
+    urls_all = re.findall(r'https?://[^\s"\\]+', proxy_body)
+    m3u8_candidates = [u for u in urls_all
+                       if any(d in u.lower() for d in ('ltsyd', 'omts.tc.qq.com', 'smtcdns'))]
+    seen = set(); uniq = []
+    for u in m3u8_candidates:
+        if u not in seen:
+            seen.add(u); uniq.append(u)
+
+    formats = []
+    for idx, fi in enumerate(fi_list):
+        drm = fi.get('drm', 0)
+        name = fi.get('name', '') or ''
+        res = fi.get('resolution', '') or ''
+        fs = fi.get('fs', 0) or 0
+        label = f"{res} · {name}"
+        if drm:
+            label += ' · DRM加密(不可下载)'
+        if fs:
+            label += f" · {_fmt_size(fs)}"
+        murl = uniq[idx] if idx < len(uniq) else (uniq[0] if uniq else '')
+        formats.append({
+            'format_id': name or str(idx), 'label': label, 'ext': 'mp4',
+            'is_video_audio': drm == 0, 'is_video_only': False, 'is_audio_only': False,
+            'drm': drm, 'm3u8_url': murl, 'height': fi.get('height', 0) or 0,
+        })
+    downloadable = [f for f in formats if not f.get('drm')]
+    if not downloadable:
+        return {"ok": False, "error": "该内容受 DRM 保护，无法下载",
+                "type": "tencent", "url": url,
+                "hint": "腾讯视频付费正片普遍使用 Widevine DRM，仅免费非加密内容可下载。"}
+    return {
+        "ok": True, "type": "tencent",
+        "title": st.get('title') or '腾讯视频', "poster": st.get('poster', ''),
+        "m3u8_url": "", "magnet": "",
+        "duration": 0, "uploader": '', "platform": '腾讯视频',
+        "formats": downloadable, "url": url,
+    }
 
 
 
@@ -2756,12 +2954,12 @@ class Engine:
                         self._save_records()
                         return {"action": "history", "ok": True}
                     # For yt-dlp types, start download directly (not preview)
+                    # For yt-dlp types, start download directly (not preview)
                     yt_types = {"weibo", "douyin", "tiktok", "facebook", "spotify",
                                 "netease", "kuaishou", "xiaohongshu", "ixigua",
-                                "mgtv", "tencent"}
+                                "mgtv", "iqiyi", "tencent"}
                     if rtype in yt_types:
                         new_gid = self.start_yt_download(url, title=title)
-                        self._save_records()
                         return {"action": "task", "ok": True,
                                 "gid": new_gid, "type": rtype}
                     else:
@@ -3160,10 +3358,22 @@ class Engine:
                 return result
             log.warning("[_extract_yt_info] Kuaishou extraction failed, falling through")
 
-        # For platforms that require cookies (iQiyi/MGTV/Tencent), try Playwright first
+        # iQiyi / Tencent: dedicated Playwright-intercept extractors (yt-dlp broken)
+        if t in ("iqiyi", "tencent"):
+            result = _extract_iqiyi_info(url) if t == "iqiyi" else _extract_tencent_info(url)
+            if result and result.get("ok"):
+                result["yt_source"] = True
+                log.info("[_extract_yt_info] %s SUCCESS" % t)
+                return result
+            if result and result.get("error"):
+                return result
+            return {"ok": False, "error": "未获取到视频信息", "type": t,
+                    "hint": "请确认链接有效，VIP/DRM 内容无法下载完整版。"}
+
+        # For platforms that require cookies (MGTV), try Playwright first
         # to get cookies from Chrome, then pass to yt-dlp
         cookiefile = None
-        if t in ("iqiyi", "mgtv", "tencent"):
+        if t == "mgtv":
             cookiefile = _get_cookies_via_playwright(url)
 
         try:
@@ -3173,6 +3383,11 @@ class Engine:
                 'extract_flat': False,
                 'skip_download': True,
             }
+            # Bypass system proxy (Clash) + cap socket timeout for Chinese sites,
+            # otherwise requests hang for minutes and freeze the whole app.
+            if t in ("xiaohongshu", "douyin", "kuaishou", "ixigua", "netease", "mgtv", "iqiyi", "tencent", "bilibili"):
+                ydl_opts['proxy'] = ''
+                ydl_opts['socket_timeout'] = 20
             if cookiefile:
                 ydl_opts['cookiefile'] = cookiefile
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -3199,6 +3414,9 @@ class Engine:
                         'skip_download': True,
                         'cookiesfrombrowser': (browser,),
                     }
+                    if t in ("xiaohongshu", "douyin", "kuaishou", "ixigua", "netease", "mgtv", "iqiyi", "tencent", "bilibili"):
+                        ydl_opts['proxy'] = ''
+                        ydl_opts['socket_timeout'] = 20
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(url, download=False)
                     if info:
@@ -3381,6 +3599,14 @@ class Engine:
             else:
                 log.warning("[_download_yt_thread] No fresh URL for %s, using original: %s" % (t, url[:100]))
 
+        # iQiyi / Tencent: dedicated Playwright-intercept downloaders (yt-dlp extractors broken)
+        if t in ("iqiyi", "tencent"):
+            if t == "iqiyi":
+                self._download_iqiyi_thread(gid, url, title)
+            else:
+                self._download_tencent_thread(gid, url, format_id, title)
+            return
+
         def progress_hook(d):
             if gid not in self.yt_tasks:
                 return
@@ -3413,16 +3639,29 @@ class Engine:
             'outtmpl': output_template,
             'overwrites': True,
         }
-
-        # For Douyin/Kuaishou direct URLs: add Referer header + bypass proxy
-        if t in ("douyin", "kuaishou"):
-            referer = "https://www.douyin.com/" if t == "douyin" else "https://www.kuaishou.com/"
+        # Chinese sites: bypass system proxy (Clash) + Referer header.
+        # Domestic CDNs hang under proxy; YouTube/X are untouched (yt-dlp handles them natively).
+        cn_sites = ("douyin", "kuaishou", "xiaohongshu", "bilibili", "ixigua",
+                    "netease", "mgtv", "iqiyi", "tencent", "weibo")
+        if t in cn_sites:
+            referer = {
+                "douyin": "https://www.douyin.com/",
+                "kuaishou": "https://www.kuaishou.com/",
+                "xiaohongshu": "https://www.xiaohongshu.com/",
+                "bilibili": "https://www.bilibili.com/",
+                "ixigua": "https://www.ixigua.com/",
+                "netease": "https://music.163.com/",
+                "mgtv": "https://www.mgtv.com/",
+                "iqiyi": "https://www.iqiyi.com/",
+                "tencent": "https://v.qq.com/",
+                "weibo": "https://weibo.com/",
+            }.get(t, "")
             ydl_opts['http_headers'] = {
                 'Referer': referer,
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             }
-            # Bypass system proxy for Chinese CDN domains
             ydl_opts['proxy'] = ''
+            ydl_opts['socket_timeout'] = 20
 
         # Format selection
         if format_id:
@@ -3487,6 +3726,228 @@ class Engine:
         if gid in self.yt_tasks:
             self.yt_tasks[gid]['state'] = 'error'
             self.yt_tasks[gid]['error'] = str(last_error)
+
+    def _download_iqiyi_thread(self, gid, url, title):
+        """爱奇艺下载：重新抓 TS 分片，curl 逐段下载（带 referer/cookie），ffmpeg 合并。"""
+        safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '爱奇艺视频'
+        info = self.yt_tasks.get(gid, {})
+        info.update({'state': 'downloading', 'progress': 0, 'size': 0,
+                     'download_rate': 0, 'output': '', 'type': 'iqiyi'})
+        self.yt_tasks[gid] = info
+
+        st = _grab_stream_subprocess('iqiyi', url) or {}
+        segs = st.get('segs', []) or []
+        cookies = st.get('cookies', []) or []
+
+        if not segs:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '未抓取到视频分片（内容可能已下架或需登录）'
+            return
+
+        ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        ck = "; ".join("%s=%s" % (c['name'], c['value']) for c in cookies if 'qiyi' in c.get('domain', ''))
+        seg_dir = os.path.join(self.save_path, f".{gid}_segs")
+        os.makedirs(seg_dir, exist_ok=True)
+        total = 0; ok = 0
+        for i, s in enumerate(segs):
+            if gid not in self.yt_tasks or self.yt_tasks[gid].get('state') == 'removed':
+                self._cleanup_seg_dir(seg_dir)
+                return
+            path = os.path.join(seg_dir, f"{i:04d}.ts")
+            try:
+                r = subprocess.run(
+                    ['curl', '-sL', '-A', ua, '-e', 'https://www.iqiyi.com/',
+                     '-H', 'Cookie: ' + ck[:400], '-o', path, '-w', '%{http_code}',
+                     '--max-time', '30', s],
+                    capture_output=True, text=True, timeout=45)
+                sz = os.path.getsize(path) if os.path.exists(path) else 0
+            except Exception:
+                sz = 0; r = None
+            if r and r.stdout == '200' and sz > 1000:
+                ok += 1; total += sz
+            else:
+                log.warning("[iQiyi dl] seg%d failed: HTTP=%s size=%s" % (i, getattr(r, 'stdout', '?'), sz))
+            self.yt_tasks[gid]['size'] = total
+            self.yt_tasks[gid]['progress'] = round(100 * (i + 1) / len(segs), 1)
+            self.yt_tasks[gid]['download_rate'] = int(total / max(time.time() - info.get('added_at', time.time()), 1))
+
+        if ok == 0:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '所有分片下载失败（可能被防盗链拦截）'
+            self._cleanup_seg_dir(seg_dir)
+            return
+
+        output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
+        cnt = 1
+        while os.path.exists(output_path):
+            output_path = os.path.join(self.save_path, f"{safe_title}_{cnt}.mp4"); cnt += 1
+        concat_list = os.path.join(seg_dir, 'concat.txt')
+        with open(concat_list, 'w') as f:
+            for i in range(len(segs)):
+                p = os.path.join(seg_dir, f"{i:04d}.ts")
+                if os.path.exists(p) and os.path.getsize(p) > 1000:
+                    f.write("file '%s'\n" % p)
+        try:
+            r = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                 '-f', 'concat', '-safe', '0', '-i', concat_list,
+                 '-c', 'copy', '-bsf:a', 'aac_adtstoasc', output_path],
+                capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and os.path.exists(output_path):
+                self.yt_tasks[gid]['state'] = 'finished'
+                self.yt_tasks[gid]['progress'] = 100
+                self.yt_tasks[gid]['output'] = output_path
+                self.yt_tasks[gid]['size'] = os.path.getsize(output_path)
+                log.info("[iQiyi dl] FINISHED gid=%s output=%s" % (gid, output_path[:100]))
+            else:
+                self.yt_tasks[gid]['state'] = 'error'
+                self.yt_tasks[gid]['error'] = '合并失败: ' + r.stderr[:150]
+        except Exception as e:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '合并异常: ' + str(e)[:150]
+        finally:
+            self._cleanup_seg_dir(seg_dir)
+
+    def _download_tencent_thread(self, gid, url, format_id, title):
+        """腾讯视频下载：重新抓 proxyhttp 取 m3u8，curl 逐段下载（带 referer/cookie），ffmpeg 合并。"""
+        safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '腾讯视频'
+        info = self.yt_tasks.get(gid, {})
+        info.update({'state': 'downloading', 'progress': 0, 'size': 0,
+                     'download_rate': 0, 'output': '', 'type': 'tencent'})
+        self.yt_tasks[gid] = info
+
+        st = _grab_stream_subprocess('tencent', url) or {}
+        proxy_body = st.get('proxy')
+        cookies = st.get('cookies', []) or []
+
+        if not proxy_body:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '未抓取到视频流接口（内容可能已下架）'
+            return
+
+        import json as _json
+        try:
+            outer = _json.loads(proxy_body)
+            vinfo_raw = outer.get('vinfo', '') or '{}'
+            vinfo = _json.loads(vinfo_raw) if isinstance(vinfo_raw, str) else vinfo_raw
+        except Exception:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '视频流接口解析失败'
+            return
+
+        fi_list = (vinfo.get('fl', {}) or {}).get('fi', []) or []
+        urls_all = re.findall(r'https?://[^\s"\\]+', proxy_body)
+        m3u8_candidates = [u for u in urls_all
+                           if any(d in u.lower() for d in ('ltsyd', 'omts.tc.qq.com', 'smtcdns'))]
+        seen = set(); uniq = []
+        for u in m3u8_candidates:
+            if u not in seen:
+                seen.add(u); uniq.append(u)
+        if not uniq:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '未解析出可下载的 m3u8 直链'
+            return
+
+        # 选择目标清晰度：优先用户选的 format_id，否则取最高非 DRM
+        target_idx = 0
+        for idx, fi in enumerate(fi_list):
+            if fi.get('drm', 0):
+                continue
+            if format_id and fi.get('name') == format_id:
+                target_idx = idx
+                break
+            if not format_id:
+                target_idx = idx  # 取最后一个非 DRM（通常最高清）
+        m3u8_url = uniq[target_idx] if target_idx < len(uniq) else uniq[0]
+
+        ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        ck = "; ".join("%s=%s" % (c['name'], c['value']) for c in cookies if 'qq.com' in c.get('domain', ''))
+
+        # 取 m3u8 播放列表
+        try:
+            r = subprocess.run(
+                ['curl', '-sL', '-A', ua, '-e', 'https://v.qq.com/',
+                 '-H', 'Cookie: ' + ck[:400], m3u8_url],
+                capture_output=True, text=True, timeout=20)
+            plist = r.stdout
+        except Exception as e:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '获取播放列表失败: ' + str(e)[:100]
+            return
+        if not plist or '#EXTM3U' not in plist:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '播放列表无效或已过期'
+            return
+
+        base = m3u8_url.rsplit('/', 1)[0] + '/'
+        segs = [base + l if not l.startswith('http') else l
+                for l in plist.splitlines() if l and not l.startswith('#')]
+
+        seg_dir = os.path.join(self.save_path, f".{gid}_segs")
+        os.makedirs(seg_dir, exist_ok=True)
+        total = 0; ok = 0
+        for i, s in enumerate(segs):
+            if gid not in self.yt_tasks or self.yt_tasks[gid].get('state') == 'removed':
+                self._cleanup_seg_dir(seg_dir)
+                return
+            path = os.path.join(seg_dir, f"{i:04d}.ts")
+            try:
+                r = subprocess.run(
+                    ['curl', '-sL', '-A', ua, '-e', 'https://v.qq.com/',
+                     '-H', 'Cookie: ' + ck[:400], '-o', path, '-w', '%{http_code}',
+                     '--max-time', '30', s],
+                    capture_output=True, text=True, timeout=45)
+                sz = os.path.getsize(path) if os.path.exists(path) else 0
+            except Exception:
+                sz = 0
+            if r and r.stdout == '200' and sz > 1000:
+                ok += 1; total += sz
+            self.yt_tasks[gid]['size'] = total
+            self.yt_tasks[gid]['progress'] = round(100 * (i + 1) / len(segs), 1)
+
+        if ok == 0:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '所有分片下载失败'
+            self._cleanup_seg_dir(seg_dir)
+            return
+
+        output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
+        cnt = 1
+        while os.path.exists(output_path):
+            output_path = os.path.join(self.save_path, f"{safe_title}_{cnt}.mp4"); cnt += 1
+        concat_list = os.path.join(seg_dir, 'concat.txt')
+        with open(concat_list, 'w') as f:
+            for i in range(len(segs)):
+                p = os.path.join(seg_dir, f"{i:04d}.ts")
+                if os.path.exists(p) and os.path.getsize(p) > 1000:
+                    f.write("file '%s'\n" % p)
+        try:
+            r = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                 '-f', 'concat', '-safe', '0', '-i', concat_list,
+                 '-c', 'copy', '-bsf:a', 'aac_adtstoasc', output_path],
+                capture_output=True, text=True, timeout=300)
+            if r.returncode == 0 and os.path.exists(output_path):
+                self.yt_tasks[gid]['state'] = 'finished'
+                self.yt_tasks[gid]['progress'] = 100
+                self.yt_tasks[gid]['output'] = output_path
+                self.yt_tasks[gid]['size'] = os.path.getsize(output_path)
+                log.info("[Tencent dl] FINISHED gid=%s output=%s" % (gid, output_path[:100]))
+            else:
+                self.yt_tasks[gid]['state'] = 'error'
+                self.yt_tasks[gid]['error'] = '合并失败: ' + r.stderr[:150]
+        except Exception as e:
+            self.yt_tasks[gid]['state'] = 'error'
+            self.yt_tasks[gid]['error'] = '合并异常: ' + str(e)[:150]
+        finally:
+            self._cleanup_seg_dir(seg_dir)
+
+    def _cleanup_seg_dir(self, seg_dir):
+        """清理临时分片目录。"""
+        try:
+            shutil.rmtree(seg_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False):
         """Start a YouTube/X video download. Returns gid."""
@@ -4255,10 +4716,25 @@ def api_poster_proxy():
         return "", 400
     url = url.replace("http://", "https://")
     try:
+        # Bypass system proxy (Clash) + short timeout: poster fetch must never hang.
+        # Referer must be the main site (not the CDN host) or anti-hotlink returns 403.
+        host = url.split('/')[2]
+        # Domestic CDNs: bypass proxy (Clash) + main-site Referer (anti-hotlink 403).
+        # Foreign hosts (ytimg/twimg): use system proxy (needed behind Clash).
+        if 'xhscdn.com' in host:
+            referer, no_proxy = 'https://www.xiaohongshu.com/', {'http': None, 'https': None}
+        elif 'douyin' in host:
+            referer, no_proxy = 'https://www.douyin.com/', {'http': None, 'https': None}
+        elif 'kuaishou' in host:
+            referer, no_proxy = 'https://www.kuaishou.com/', {'http': None, 'https': None}
+        elif 'bili' in host:
+            referer, no_proxy = 'https://www.bilibili.com/', {'http': None, 'https': None}
+        else:
+            referer, no_proxy = 'https://' + host + '/', None
         r = requests.get(url, headers={
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Referer': 'https://' + url.split('/')[2] + '/',
-        }, timeout=10)
+            'Referer': referer,
+        }, timeout=(5, 8), proxies=no_proxy)
         return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
     except Exception:
         return "", 404
