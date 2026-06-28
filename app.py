@@ -547,13 +547,15 @@ def _extract_kuaishou_info(url):
     window.INIT_STATE — no captcha, no Playwright needed."""
     import json as _json
 
+    # Bypass system proxy (Clash) for Chinese sites — proxy causes timeouts
+    no_proxy = {'http': None, 'https': None}
     final_url = url
     photo_id = None
     try:
         r = requests.head(url, headers={
             'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) '
                           'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-        }, timeout=10, allow_redirects=True)
+        }, timeout=(5, 5), allow_redirects=True, proxies=no_proxy)
         if r.url:
             final_url = r.url
     except Exception:
@@ -587,11 +589,12 @@ def _extract_kuaishou_info(url):
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'zh-CN,zh;q=0.9',
             },
-            timeout=15, allow_redirects=True,
+            timeout=(5, 8), allow_redirects=True, proxies=no_proxy,
         )
         html = r.text
-    except Exception:
-        return {"ok": False, "error": "无法获取快手页面内容", "type": "kuaishou"}
+    except Exception as e:
+        log.warning("[Kuaishou] page fetch failed: %s" % str(e)[:100])
+        return {"ok": False, "error": "无法获取快手页面内容（网络超时，请检查代理设置）", "type": "kuaishou"}
 
     if not html or len(html) < 1000:
         return {"ok": False, "error": "无法获取快手页面内容（可能被反爬限制）", "type": "kuaishou"}
@@ -3411,13 +3414,15 @@ class Engine:
             'overwrites': True,
         }
 
-        # For Douyin/Kuaishou direct URLs: add Referer header to avoid 403
+        # For Douyin/Kuaishou direct URLs: add Referer header + bypass proxy
         if t in ("douyin", "kuaishou"):
             referer = "https://www.douyin.com/" if t == "douyin" else "https://www.kuaishou.com/"
             ydl_opts['http_headers'] = {
                 'Referer': referer,
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             }
+            # Bypass system proxy for Chinese CDN domains
+            ydl_opts['proxy'] = ''
 
         # Format selection
         if format_id:
