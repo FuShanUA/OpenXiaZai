@@ -13,3 +13,4 @@ dist/
 *.dmg
 *.exe
 *.pkg
+*.log
