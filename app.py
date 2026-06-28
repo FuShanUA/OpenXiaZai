@@ -47,6 +47,10 @@ app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
 #  Link classification
 # --------------------------------------------------------------------------- #
 def classify(url):
+    # 从分享文本中提取真实 URL（抖音/快手/小红书 App 分享带口令前缀）
+    m = re.search(r'https?://[^\s"<>\']+', url)
+    if m:
+        url = m.group(0)
     u = url.strip().lower()
     if u.startswith("magnet:"):
         return "torrent"
@@ -101,7 +105,7 @@ def classify(url):
         if re.match(r'https?://(www\.|m\.)?mgtv\.com/', u):
             return "mgtv"
         # 爱奇艺 — yt-dlp handler
-        if re.match(r'https?://(www\.|m\.)?iqiyi\.com/', u):
+        if re.match(r'https?://(www\.|m\.)?iqiyi\.com/', u) or re.match(r'https?://qy\.net/', u):
             return "iqiyi"
         # 腾讯视频 — yt-dlp handler (v.qq.com)
         if re.match(r'https?://(www\.|m\.)?(v\.qq\.com|film\.qq\.com)/', u):
@@ -453,12 +457,25 @@ def _extract_douyin_from_page(context, url):
                 break
         log.info("[Douyin] s_v_web_id=%s, cookies: %s" % (got_webid, ', '.join(cookie_names[:8])))
 
-        # Step 2: Extract aweme_id from URL
-        m = _re.search(r'/video/(\d+)', url)
+        # Step 2: Resolve short link (v.douyin.com) to full URL, then extract aweme_id
+        final_url = url
+        if 'v.douyin.com' in url or 'iesdouyin.com' in url:
+            # 用 requests 解析短链接重定向，不走 page.goto（避免页面跳转破坏 webmssdk 签名环境）
+            try:
+                log.info("[Douyin] Resolving short link %s..." % url[:60])
+                rr = requests.head(url, headers={
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }, timeout=8, allow_redirects=True, proxies={'http': None, 'https': None})
+                if rr.url:
+                    final_url = rr.url
+                log.info("[Douyin] Resolved to %s" % final_url[:80])
+            except Exception as e:
+                log.warning("[Douyin] short link resolve: %s" % str(e)[:80])
+        m = _re.search(r'/video/(\d+)', final_url)
         if not m:
-            m = _re.search(r'/note/(\d+)', url)
+            m = _re.search(r'/note/(\d+)', final_url)
         if not m:
-            log.warning("[Douyin] Cannot extract aweme_id from %s" % url[:80])
+            log.warning("[Douyin] Cannot extract aweme_id from %s" % final_url[:80])
             return None
         aweme_id = m.group(1)
         log.info("[Douyin] aweme_id=%s, calling API via fetch..." % aweme_id)
@@ -953,11 +970,10 @@ def _extract_title_from_url(url):
 
 
 def _cleanup_chromium():
-    """清理残留的 Chromium/Playwright 子进程，避免堆积导致新进程启动卡死。"""
+    """清理残留的 Playwright Chromium 子进程，避免堆积导致新进程启动卡死或服务崩溃。
+    只清路径含 ms-playwright 的进程（Playwright 自带 chromium），不碰用户的 Chrome。"""
     try:
-        # 只清 Playwright 启动的 headless shell（路径含 ms-playwright），
-        # 避免误杀用户的 Google Chrome / 其它浏览器。
-        out = subprocess.run(['pgrep', '-f', 'ms-playwright.*chrome-headless-shell'],
+        out = subprocess.run(['pgrep', '-f', 'ms-playwright'],
                              capture_output=True, text=True, timeout=3).stdout
         for pid in out.split():
             try:
@@ -966,13 +982,15 @@ def _cleanup_chromium():
                 pass
     except Exception:
         pass
-    except Exception:
-        pass
 
 
 def _grab_stream_subprocess(platform, url):
     """调用 grab_stream.py 子进程抓流，返回解析后的 dict 或 None。
     子进程隔离避免 Playwright 崩溃影响 Flask 主进程。"""
+    # 从分享文本中提取纯 URL（抖音/快手等 App 分享带口令前缀）
+    m = re.search(r'https?://[^\s"<>\']+', url)
+    if m:
+        url = m.group(0)
     _cleanup_chromium()
     script = os.path.join(BASE_DIR, 'grab_stream.py')
     try:
@@ -1026,9 +1044,10 @@ def _extract_iqiyi_info(url):
     st = _grab_stream_subprocess('iqiyi', url)
     if not st:
         return None
-    if st.get('error'):
-        return {"ok": False, "error": "抓流失败: " + st['error'], "type": "iqiyi", "url": url}
     segs = st.get('segs', []) or []
+    # error 只在没有抓到分片时才判定为失败（页面导航错误不影响已拦截的流数据）
+    if st.get('error') and not segs:
+        return {"ok": False, "error": "抓流失败: " + st['error'], "type": "iqiyi", "url": url}
     if not segs:
         return {"ok": False, "error": "未抓取到视频分片（内容可能已下架或需登录）",
                 "type": "iqiyi", "url": url,
@@ -1053,9 +1072,9 @@ def _extract_tencent_info(url):
     st = _grab_stream_subprocess('tencent', url)
     if not st:
         return None
-    if st.get('error'):
-        return {"ok": False, "error": "抓流失败: " + st['error'], "type": "tencent", "url": url}
     proxy_body = st.get('proxy')
+    if st.get('error') and not proxy_body:
+        return {"ok": False, "error": "抓流失败: " + st['error'], "type": "tencent", "url": url}
     if not proxy_body:
         return {"ok": False, "error": "未抓取到视频流接口（内容可能已下架）",
                 "type": "tencent", "url": url,
@@ -1103,7 +1122,7 @@ def _extract_tencent_info(url):
         "ok": True, "type": "tencent",
         "title": st.get('title') or '腾讯视频', "poster": st.get('poster', ''),
         "m3u8_url": "", "magnet": "",
-        "duration": 0, "uploader": '', "platform": '腾讯视频',
+        "duration": st.get('duration', 0), "uploader": '', "platform": '腾讯视频',
         "formats": downloadable, "url": url,
     }
 
@@ -3320,27 +3339,27 @@ class Engine:
         # For Douyin: yt-dlp needs fresh cookies that Playwright can't provide.
         # Use Playwright to intercept the aweme/v1/web/aweme/detail API response.
         if t == "douyin":
-            log.info("[_extract_yt_info] Douyin branch: launching Playwright for %s" % url[:100])
-            try:
-                context, tmp_profile = _launch_playwright_context()
-                if context:
-                    try:
-                        log.info("[_extract_yt_info] Calling _extract_douyin_from_page...")
-                        result = _extract_douyin_from_page(context, url)
-                        log.info("[_extract_yt_info] Douyin result: ok=%s title=%s formats=%d url_field=%s" % (
-                            bool(result and result.get("ok")),
-                            str(result.get("title",""))[:40] if result else "None",
-                            len(result.get("formats",[])) if result and result.get("formats") else 0,
-                            "yes" if result and result.get("url") else "NO"))
-                        if result and result.get("ok"):
-                            result["yt_source"] = True
-                            log.info("[_extract_yt_info] Douyin SUCCESS, returning result")
-                            return result
-                        log.warning("[_extract_yt_info] Douyin extraction returned no result, falling through")
-                    finally:
-                        _close_playwright_context(context, tmp_profile)
-            except Exception as e:
-                log.warning("[_extract_yt_info] Douyin Playwright exception: %s" % str(e)[:200])
+            log.info("[_extract_yt_info] Douyin branch: subprocess grab for %s" % url[:100])
+            st = _grab_stream_subprocess('douyin', url)
+            if st and not st.get('error'):
+                formats = []
+                for f in (st.get('formats') or []):
+                    formats.append({
+                        'format_id': f.get('format_id', ''), 'label': f.get('label', ''),
+                        'ext': 'mp4', 'height': f.get('height', 0),
+                        'is_video_audio': True, 'is_video_only': False, 'is_audio_only': False,
+                        'url': f.get('url', ''),
+                    })
+                return {
+                    "ok": True, "type": "douyin", "title": st.get('title') or '抖音视频',
+                    "poster": st.get('poster', ''), "m3u8_url": st.get('m3u8_url', ''),
+                    "magnet": "", "duration": st.get('duration', 0),
+                    "uploader": st.get('uploader', ''), "platform": "抖音",
+                    "formats": formats, "url": url, "yt_source": True,
+                }
+            if st and st.get('error'):
+                log.warning("[_extract_yt_info] Douyin grab error: %s" % st['error'][:120])
+            log.warning("[_extract_yt_info] Douyin extraction failed, falling through")
 
         # For Kuaishou: yt-dlp doesn't support kuaishou.com URLs.
         # Use the mobile share page to extract video data.
@@ -3435,6 +3454,7 @@ class Engine:
                 "iqiyi": "爱奇艺需要浏览器Cookie才能提取视频。请先在Chrome中访问iqiyi.com，然后重试粘贴链接。",
                 "mgtv": "芒果TV可能需要登录Cookie。请先在Chrome中访问mgtv.com并登录，然后重试。",
                 "tencent": "腾讯视频可能需要登录Cookie。请先在Chrome中访问v.qq.com并登录，然后重试。",
+                "ixigua": "西瓜视频的提取器当前失效（yt-dlp 上游问题），暂不支持。可尝试用浏览器手动下载或换其他平台。",
             }
             return {"ok": False, "error": "未获取到视频信息", "type": t,
                     "hint": hints.get(t, "")}
@@ -3582,14 +3602,9 @@ class Engine:
                     pass
             elif t == "douyin":
                 try:
-                    context, tmp_profile = _launch_playwright_context()
-                    if context:
-                        try:
-                            fresh = _extract_douyin_from_page(context, url)
-                            if fresh and fresh.get("ok"):
-                                fresh_url = fresh.get("m3u8_url", "")
-                        finally:
-                            _close_playwright_context(context, tmp_profile)
+                    fresh = _grab_stream_subprocess('douyin', url)
+                    if fresh and not fresh.get('error') and fresh.get('m3u8_url'):
+                        fresh_url = fresh['m3u8_url']
                 except Exception:
                     pass
             if fresh_url:
@@ -3739,6 +3754,14 @@ class Engine:
         segs = st.get('segs', []) or []
         cookies = st.get('cookies', []) or []
 
+        # 首次抓流失败时重试一次（chromium 残留进程可能干扰首次启动）
+        if not segs:
+            log.warning("[iQiyi dl] first grab failed, retrying after cleanup...")
+            time.sleep(2)
+            st = _grab_stream_subprocess('iqiyi', url) or {}
+            segs = st.get('segs', []) or []
+            cookies = st.get('cookies', []) or []
+
         if not segs:
             self.yt_tasks[gid]['state'] = 'error'
             self.yt_tasks[gid]['error'] = '未抓取到视频分片（内容可能已下架或需登录）'
@@ -3819,6 +3842,14 @@ class Engine:
         st = _grab_stream_subprocess('tencent', url) or {}
         proxy_body = st.get('proxy')
         cookies = st.get('cookies', []) or []
+
+        # 首次抓流失败时重试一次（chromium 残留进程可能干扰首次启动）
+        if not proxy_body:
+            log.warning("[Tencent dl] first grab failed, retrying after cleanup...")
+            time.sleep(2)
+            st = _grab_stream_subprocess('tencent', url) or {}
+            proxy_body = st.get('proxy')
+            cookies = st.get('cookies', []) or []
 
         if not proxy_body:
             self.yt_tasks[gid]['state'] = 'error'
@@ -3948,6 +3979,19 @@ class Engine:
             shutil.rmtree(seg_dir, ignore_errors=True)
         except Exception:
             pass
+
+    def retry_yt_download(self, gid):
+        """重试失败的 yt 下载任务：取旧任务的 url/title/format_id 重新启动。"""
+        info = self.yt_tasks.get(gid, {})
+        url = info.get('url', '')
+        title = info.get('title', '视频下载')
+        format_id = info.get('format_id')
+        if not url:
+            return False
+        # 删掉旧任务，启动新任务
+        del self.yt_tasks[gid]
+        new_gid = self.start_yt_download(url, format_id=format_id, title=title)
+        return new_gid
 
     def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False):
         """Start a YouTube/X video download. Returns gid."""
@@ -4455,6 +4499,13 @@ def api_retry():
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.resume_m3u8_download(gid))
+    elif gid and gid.startswith("yt_"):
+        new_gid = engine.retry_yt_download(gid)
+        if new_gid:
+            return jsonify(ok=True, gid=new_gid)
+        return jsonify(ok=False, error="任务信息已丢失，无法重试")
+    elif gid and gid.startswith("bili_"):
+        return jsonify(ok=False, error="B站任务请重新添加链接下载")
     else:
         return jsonify(ok=engine.resume(gid))
 

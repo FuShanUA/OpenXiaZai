@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体、YouTube/X 视频 (yt-dlp)、B站视频 (DASH流API)
+- **多协议支持**：磁力链接 (magnet)、种子 (torrent)、HTTP/HTTPS 直链、FTP、ed2k (电驴)、M3U8 流媒体、YouTube/X 视频 (yt-dlp)、B站视频 (DASH流API)、爱奇艺/腾讯视频/抖音 (Playwright 拦流)
 - **种子文件选择**：添加磁力/种子后弹出文件选择窗口，可勾选需要下载的文件，支持按类型筛选（视频/音乐/图片/文档）
 - **多任务并行**：支持同时下载最多 3 个任务，每个任务 16 线程
 - **DHT 加速**：内置 DHT 启动节点、持久化路由表、扩展 Tracker 列表，加速磁力链接解析
@@ -22,7 +22,7 @@ brew install aria2
 brew install amule   # 可选：ed2k 电驴下载支持
 
 # Python 依赖
-pip install flask pywebview requests yt-dlp yt-dlp
+pip install flask pywebview requests yt-dlp playwright
 ```
 
 ### 克隆
@@ -32,7 +32,10 @@ git clone https://github.com/FuShanUA/OpenXiaZai.git
 cd OpenXiaZai
 python -m venv venv
 source venv/bin/activate
-pip install flask pywebview requests yt-dlp
+pip install flask pywebview requests yt-dlp playwright
+
+# Playwright 浏览器（爱奇艺/腾讯视频/抖音抓流需要）
+python -m playwright install chromium
 ```
 
 ## 使用
@@ -77,6 +80,7 @@ venv/bin/python app.py
 ```
 OpenXiaZai/
 ├── app.py              # Flask 后端 + aria2 RPC 客户端
+├── grab_stream.py      # 爱奇艺/腾讯视频/抖音 抓流子进程（Playwright 拦截播放器请求）
 ├── launcher.py         # 桌面应用启动器（pywebview）
 ├── templates/
 │   └── index.html      # 前端界面

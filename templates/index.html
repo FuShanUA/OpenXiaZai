@@ -442,13 +442,19 @@ $('url').addEventListener('input',()=>{
   else if(/https?:\/\/(www\.)?(xiaohongshu\.com|xhslink\.com)\//.test(v))t='xiaohongshu';
   else if(/https?:\/\/(www\.)?ixigua\.com\//.test(v))t='ixigua';
   else if(/https?:\/\/(www\.|m\.)?mgtv\.com\//.test(v))t='mgtv';
-  else if(/https?:\/\/(www\.|m\.)?iqiyi\.com\//.test(v))t='iqiyi';
+  else if(/https?:\/\/(www\.|m\.)?(iqiyi\.com|qy\.net)\//.test(v))t='iqiyi';
   else if(/https?:\/\/(www\.|m\.)?(v\.qq\.com|film\.qq\.com)\//.test(v))t='tencent';
   else if(v.startsWith('http'))t='http';
   h.style.display='block';
   const YT_TYPES=['yt_media','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','iqiyi','tencent'];
   h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(YT_TYPES.includes(t)?' · 将使用 yt-dlp 下载':'')+(t==='bilibili'?' · 将使用B站API解析':'');
 });
+
+// 从分享文本中提取真实 URL（抖音/快手/小红书等 App 分享会带口令前缀）
+function extractUrl(text){
+  const m=text.match(/https?:\/\/[^\s，。、"'<>]+/i);
+  return m?m[0]:text;
+}
 
 // 判断 URL 是否为直接文件下载（不走视频提取）
 // 只保留二进制/压缩格式；文本/网页类（html/json/txt等）统一走解析流程
@@ -464,9 +470,9 @@ function isDirectFileDownload(url){
 }
 
 $('addBtn').onclick=async()=>{
-  const url=$('url').value.trim();
+  let url=extractUrl($('url').value.trim());
   if(!url){return}
-
+   $('url').value=url; // 回填提取后的纯链接
   const v=url.toLowerCase();
 
   // 不支持的类型：提前拦截，给出明确提示
@@ -1558,7 +1564,7 @@ function renderTask(t){
   el.innerHTML=html;
   el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
   el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
-  el.querySelector('[data-act=retry]')?.addEventListener('click',()=>post('/api/retry',{gid:t.gid}));
+  el.querySelector('[data-act=retry]')?.addEventListener('click',async()=>{const r=await post('/api/retry',{gid:t.gid});if(r&&r.ok){poll();}else if(r&&r.error){await customAlert('重试失败: '+r.error);}});
   el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('删除此任务？将移至回收站。',{danger:true}))await post('/api/stop',{gid:t.gid})});
   el.querySelector('[data-act=openDir]')?.addEventListener('click',()=>post('/api/open_folder',{path:t.dir||''}));
   // File list toggle
