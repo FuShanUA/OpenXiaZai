@@ -460,6 +460,15 @@ function isDirectFileDownload(url){
 $('addBtn').onclick=async()=>{
   const url=$('url').value.trim();
   if(!url){return}
+
+  // If a preview card is showing, auto-start its download before processing new URL
+  if($('ytPreview').style.display==='block'&&ytData&&url!==ytData.url){
+    $('addBtn').disabled=true;$('addBtn').textContent='开始上一个下载…';
+    try{const r=await post('/api/download_yt',{url:ytData.url,title:ytData.title,format_id:ytSelectedFormat,is_audio_only:false});
+    if(r&&r.ok){hideYtPreview();switchTab('tasks')}}catch(e){}
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+  }
+
   const v=url.toLowerCase();
 
   // 不支持的类型：提前拦截，给出明确提示
@@ -758,9 +767,8 @@ document.addEventListener('keydown',e=>{
     const t=(text||'').trim();
     if(!t||!LINK_RE.test(t))return;
     if(Object.keys(modalStates).length>0)return;
-    if($('cxPreview').style.display==='block')return;
-  if($('ytPreview').style.display==='block')return;
-  if($('biliPreview').style.display==='block')return;
+    // Don't block auto-paste when preview is showing — the add button
+  // handler will auto-start the current download before processing new URL
     if($('confirmOverlay').style.display==='flex')return;
     if(document.activeElement===$('url')&&$('url').value===t)return;
     if(t===window._clipLastText)return;
