@@ -413,11 +413,42 @@ function customAlert(message, opts){
 
 
 // live link-type detection
+function detectType(v){
+  if(v.startsWith('magnet:'))return 'torrent';
+  if(!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent'))return 'torrent_file';
+  if(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent'))return 'torrent_url';
+  if(v.startsWith('ftp')||v.startsWith('sftp'))return 'ftp';
+  if(v.startsWith('ed2k'))return 'ed2k';
+  if(v.includes('quark.cn'))return 'quark';
+  if(v.startsWith('thunder'))return 'thunder';
+  if(/\.m3u8($|\?)/.test(v))return 'm3u8';
+  if(/\.(mp4|mkv|avi|mov|flv|webm|ts|m4v|wmv)($|\?)/.test(v))return 'direct';
+  if(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(v))return 'yt_media';
+  if(/https?:\/\/(www\.)?(x\.com|twitter\.com|t\.co)\//.test(v))return 'yt_media';
+  if(/https?:\/\/(www\.)?bilibili\.com\/(video|bangumi)\//.test(v))return 'bilibili';
+  if(/https?:\/\/b23\.tv\//.test(v))return 'bilibili';
+  if(/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn)\//.test(v))return 'weibo';
+  if(/https?:\/\/t\.cn\//.test(v))return 'weibo';
+  if(/https?:\/\/(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com)\//.test(v))return 'douyin';
+  if(/https?:\/\/(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)\//.test(v))return 'tiktok';
+  if(/https?:\/\/(www\.)?facebook\.com\//.test(v)&&(/\/video/.test(v)||/\/watch/.test(v)||/\/reel/.test(v)||/\/posts/.test(v)||/\/permalink/.test(v)))return 'facebook';
+  if(/https?:\/\/open\.spotify\.com\/(track|album|playlist|episode|show)\//.test(v))return 'spotify';
+  if(/https?:\/\/music\.163\.com\/#\/(song|album|playlist|dj|mv)/.test(v))return 'netease';
+  if(/https?:\/\/(www\.)?(kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com)\//.test(v))return 'kuaishou';
+  if(/https?:\/\/(www\.)?(xiaohongshu\.com|xhslink\.com)\//.test(v))return 'xiaohongshu';
+  if(/https?:\/\/(www\.)?ixigua\.com\//.test(v))return 'ixigua';
+  if(/https?:\/\/(www\.|m\.)?mgtv\.com\//.test(v))return 'mgtv';
+  if(/https?:\/\/(www\.|m\.)?(iqiyi\.com|qy\.net)\//.test(v))return 'iqiyi';
+  if(/https?:\/\/(www\.|m\.)?(v\.qq\.com|film\.qq\.com)\//.test(v))return 'tencent';
+  if(v.startsWith('http'))return 'http';
+  return 'http';
+}
+
 $('url').addEventListener('input',()=>{
   const v=$('url').value.trim().toLowerCase();
   const h=$('typeHint');
   if(!v){h.style.display='none';return}
-  let t='http';
+  const t=detectType(v);
   if(v.startsWith('magnet:'))t='torrent';
   else if(!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent'))t='torrent_file';
   else if(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent'))t='torrent_url';
@@ -617,6 +648,7 @@ $('addBtn').onclick=async()=>{
 
   // 非视频平台链接（magnet/ftp/http直链/m3u8/thunder 等）→ 出预览浮窗
   $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+  const t=detectType(v);
   if(t==='torrent'){
     // 磁力链接 → 浮窗预览（点击后 add + 文件选择）
     showDirectPreview({type:'torrent',title:'磁力链接',url:url,magnet:url});
