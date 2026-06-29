@@ -481,41 +481,10 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
-  // 本地种子文件路径（/path/to/file.torrent 或 ~/path/file.torrent）
-  if(!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent')){
-    $('addBtn').disabled=true;$('addBtn').textContent='添加种子…';
-    try{
-      const res=await post('/api/add',{url});
-      if(!res||res.ok===false){await customAlert(res?.error||'添加失败，请检查种子文件路径');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
-      $('url').value='';$('typeHint').style.display='none';
-      if(res.type==='torrent'){
-        showFileModal(res.gid);
-      } else {
-        switchTab('tasks');
-      }
-    }catch(e){
-      await customAlert('添加失败: '+e.message);
-    }
-    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
-    return;
-  }
-
-  // 远程种子文件 URL（http(s)://.../*.torrent）
-  if(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent')){
-    $('addBtn').disabled=true;$('addBtn').textContent='下载种子…';
-    try{
-      const res=await post('/api/add',{url});
-      if(!res||res.ok===false){await customAlert(res?.error||'获取远程种子文件失败');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
-      $('url').value='';$('typeHint').style.display='none';
-      if(res.type==='torrent'){
-        showFileModal(res.gid);
-      } else {
-        switchTab('tasks');
-      }
-    }catch(e){
-      await customAlert('添加失败: '+e.message);
-    }
-    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+  // 本地种子文件 / 远程种子 URL → 出浮窗预览（点击后 add + 文件选择）
+  if((!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent'))
+     ||(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent'))){
+    showDirectPreview({type:'torrent',title:url.split('/').pop().split('?')[0]||'种子文件',url:url});
     return;
   }
 
@@ -646,14 +615,11 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
-  // 非视频平台链接（magnet/ftp/http直链/m3u8 等）→ 出预览浮窗，用户选直接下载或加入队列
+  // 非视频平台链接（magnet/ftp/http直链/m3u8/thunder 等）→ 出预览浮窗
   $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
-  const dt=TYPES[t]||t;
-  // 磁力/种子：先 add 创建任务拿文件信息，再弹预览
   if(t==='torrent'){
-    const res=await post('/api/add',{url});
-    if(res&&res.ok){showFileModal(res.gid)}
-    else{await customAlert(res?.error||'添加失败')}
+    // 磁力链接 → 浮窗预览（点击后 add + 文件选择）
+    showDirectPreview({type:'torrent',title:'磁力链接',url:url,magnet:url});
   }else if(t==='m3u8'||v.endsWith('.m3u8')){
     showDirectPreview({type:'m3u8',title:url.split('/').pop().split('?')[0]||'M3U8流',url:url,m3u8_url:url});
   }else{
