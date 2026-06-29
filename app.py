@@ -1147,6 +1147,29 @@ def _extract_tencent_info(url):
 
 
 
+def _yt_audio_original_score(fmt, info_lang=''):
+    """Score how likely a format carries the ORIGINAL audio track (higher = better).
+
+    YouTube等平台会对同一画质输出多语种配音音轨（例如英文原声 + 俄语/西语配音），
+    它们的 combined 格式以 "-N" 后缀区分语言（如 96-0=俄语、96-11=英语原声）。
+    去重时若只取"第一个"会误取配音轨，导致英文视频下载出俄语音轨。
+    本函数综合 language_preference / format_note / language 三者判定原声轨。
+    """
+    score = 0
+    # yt-dlp 会在原声/默认音轨上设置 language_preference（如 10），配音轨为 None
+    lp = fmt.get('language_preference')
+    if isinstance(lp, (int, float)):
+        score += 1000 + lp
+    note = fmt.get('format_note') or ''
+    if 'original' in note.lower():
+        score += 100
+    lang = (fmt.get('language') or '').replace('_', '-')
+    base = info_lang.replace('_', '-').split('-')[0] if info_lang else ''
+    if base and lang and lang.split('-')[0] == base:
+        score += 50
+    return score
+
+
 def _extract_with_ytdlp(url):
     """使用 yt-dlp（带浏览器 cookie）回退提取视频。
 
@@ -1185,8 +1208,12 @@ def _extract_with_ytdlp(url):
 
             # Build format list for preview card
             formats_raw = info.get('formats', []) or []
-            formats = []
-            seen_heights = set()
+            info_lang = info.get('language') or ''
+            # Keep the best candidate per key; for combined formats prefer the
+            # ORIGINAL audio track (see _yt_audio_original_score) so multi-language
+            # videos don't surface a dubbed format to the UI.
+            best_by_key = {}
+            loose = []
             for f in formats_raw:
                 height = f.get('height') or 0
                 ext = f.get('ext', '') or ''
@@ -1201,6 +1228,8 @@ def _extract_with_ytdlp(url):
                 is_video_audio = vcodec != 'none' and acodec != 'none'
                 is_video_only = vcodec != 'none' and (acodec == 'none' or not acodec)
                 is_audio_only = vcodec == 'none' and acodec != 'none'
+                if not (is_video_audio or is_video_only or is_audio_only):
+                    continue
 
                 dedup_key = None
                 if is_video_audio:
@@ -1209,10 +1238,6 @@ def _extract_with_ytdlp(url):
                     dedup_key = ('v', height, ext)
                 elif is_audio_only:
                     dedup_key = ('a', int(abr), ext)
-                if dedup_key and dedup_key in seen_heights:
-                    continue
-                if dedup_key:
-                    seen_heights.add(dedup_key)
 
                 # Build display label
                 label = ''
@@ -1231,7 +1256,7 @@ def _extract_with_ytdlp(url):
                 if not label:
                     label = format_id or 'unknown'
 
-                formats.append({
+                entry = {
                     'format_id': format_id,
                     'label': label,
                     'is_video_audio': is_video_audio,
@@ -1242,7 +1267,17 @@ def _extract_with_ytdlp(url):
                     'ext': ext,
                     'tbr': tbr,
                     'filesize': filesize,
-                })
+                }
+                if dedup_key is None:
+                    loose.append(entry)
+                    continue
+                quality = (height or 0) * 100 + (tbr or 0)
+                rank = (_yt_audio_original_score(f, info_lang) if is_video_audio else 0, quality)
+                prev = best_by_key.get(dedup_key)
+                if prev is None or rank > prev[0]:
+                    best_by_key[dedup_key] = (rank, entry)
+
+            formats = [entry for _rank, entry in best_by_key.values()] + loose
 
             # Keep format list manageable
             formats = formats[:15]
@@ -1276,7 +1311,11 @@ def _extract_with_ytdlp(url):
             platform = info.get('extractor_key', '') or ''
             formats_raw = info.get('formats', []) or []
             formats = []
-            for f in formats_raw[:10]:
+            # Prefer the original-language audio track when present, so a dubbed
+            # format is not surfaced for multi-language videos.
+            info_lang = info.get('language') or ''
+            for f in sorted(formats_raw,
+                            key=lambda x: -_yt_audio_original_score(x, info_lang))[:10]:
                 height = f.get('height') or 0
                 ext = f.get('ext', '') or ''
                 label = f'{height}P · {ext}' if height else f.get('format_id', '')
@@ -3490,8 +3529,13 @@ class Engine:
 
         # Collect available formats for user selection
         formats_raw = info.get('formats', []) or []
-        formats = []
-        seen_heights = set()
+        info_lang = info.get('language') or ''
+        # Keep the best candidate per (category, height/bitrate, ext). For combined
+        # (video+audio) formats we additionally prefer the ORIGINAL audio track, so a
+        # multi-language video (e.g. an English video with Russian/Spanish dubs) does
+        # not surface a dubbed format to the UI and get downloaded with the wrong audio.
+        best_by_key = {}
+        loose = []
         for f in formats_raw:
             ftype = f.get('type', 'unknown')
             # Skip storyboards, trailers, and purely audio-only formats without video
@@ -3512,6 +3556,8 @@ class Engine:
             is_video_audio = vcodec != 'none' and acodec != 'none'
             is_video_only = vcodec != 'none' and (acodec == 'none' or not acodec)
             is_audio_only = vcodec == 'none' and acodec != 'none'
+            if not (is_video_audio or is_video_only or is_audio_only):
+                continue
 
             # Deduplicate same-height video+audio combined formats (prefer best)
             # and same-bitrate audio-only formats
@@ -3522,9 +3568,6 @@ class Engine:
                 dedup_key = ('v', height, ext)
             elif is_audio_only:
                 dedup_key = ('a', int(abr), ext)
-
-            if dedup_key and dedup_key in seen_heights:
-                continue
 
             # Only include meaningful formats
             label = ''
@@ -3537,24 +3580,32 @@ class Engine:
 
             # Quality score for sorting (higher = better)
             quality = (height or 0) * 100 + (tbr or 0)
+            # Rank: original-language audio first, then quality. Only meaningful for
+            # combined formats (video-only/audio-only always score 0 here).
+            rank = (_yt_audio_original_score(f, info_lang) if is_video_audio else 0, quality)
 
-            if is_video_audio or is_video_only or is_audio_only:
-                if dedup_key:
-                    seen_heights.add(dedup_key)
-                formats.append({
-                    'format_id': format_id,
-                    'label': label,
-                    'ext': ext,
-                    'height': height,
-                    'filesize': filesize,
-                    'tbr': int(tbr) if tbr else 0,
-                    'vcodec': vcodec,
-                    'acodec': acodec,
-                    'is_video_audio': is_video_audio,
-                    'is_video_only': is_video_only,
-                    'is_audio_only': is_audio_only,
-                    'quality': quality,
-                })
+            entry = {
+                'format_id': format_id,
+                'label': label,
+                'ext': ext,
+                'height': height,
+                'filesize': filesize,
+                'tbr': int(tbr) if tbr else 0,
+                'vcodec': vcodec,
+                'acodec': acodec,
+                'is_video_audio': is_video_audio,
+                'is_video_only': is_video_only,
+                'is_audio_only': is_audio_only,
+                'quality': quality,
+            }
+            if dedup_key is None:
+                loose.append(entry)
+                continue
+            prev = best_by_key.get(dedup_key)
+            if prev is None or rank > prev[0]:
+                best_by_key[dedup_key] = (rank, entry)
+
+        formats = [entry for _rank, entry in best_by_key.values()] + loose
 
         # Sort: video+audio best first, then video-only, then audio-only
         formats.sort(key=lambda f: (
@@ -3677,6 +3728,19 @@ class Engine:
             'outtmpl': output_template,
             'overwrites': True,
         }
+        # Never merge more than one audio stream: a combined format (video+audio)
+        # plus a stray "bestaudio" would otherwise pick up a dubbed track and embed
+        # a second (wrong-language) audio stream. yt-dlp's default is already False,
+        # but we set it explicitly so behaviour is guaranteed and documented.
+        ydl_opts['allow_multiple_audio_streams'] = False
+        ydl_opts['allow_multiple_video_streams'] = False
+        # Prefer the ORIGINAL audio track on every site (YouTube / X / 通用 yt-dlp 站点).
+        # Some videos ship multiple dubbed audio tracks (e.g. an English video with a
+        # Russian dub). "lang" maps to yt-dlp's language_preference, which the extractor
+        # sets highest on the original/default track, so bestaudio / best resolve to the
+        # original language regardless of platform. Safe for single-audio sites (all
+        # tracks score the same, so quality still decides).
+        ydl_opts['format_sort'] = ['lang']
         # Chinese sites: bypass system proxy (Clash) + Referer header.
         # Domestic CDNs hang under proxy; YouTube/X are untouched (yt-dlp handles them natively).
         cn_sites = ("douyin", "kuaishou", "xiaohongshu", "bilibili", "ixigua",
