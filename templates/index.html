@@ -646,27 +646,20 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
-  // 非 HTTP 链接（magnet/ftp 等）→ 原有流程
-  $('addBtn').disabled=true;$('addBtn').textContent='添加中…';
-  try{
-    const res=await post('/api/add',{url});
-    if(!res||res.ok===false){await customAlert(res?.error||'添加失败，请检查链接或后端服务');$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
-    $('url').value='';$('typeHint').style.display='none';
-    // Warn if files already exist
-    if(res.existing_files&&res.existing_files.length>0){
-      const names=res.existing_files.map(f=>f.name).join(', ');
-      const ok=await customConfirm('已存在下载文件：'+names+'。\n\n是否覆盖已有文件重新下载？',{title:'重复下载',okText:'覆盖',danger:true});
-      if(!ok){$('addBtn').disabled=false;$('addBtn').textContent='添加下载';return}
-    }
-    if(res.type==='torrent'){
-      showFileModal(res.gid);
-    } else {
-      switchTab('tasks');
-    }
-  }catch(e){
-    await customAlert('添加失败: '+e.message);
-  }
+  // 非视频平台链接（magnet/ftp/http直链/m3u8 等）→ 出预览浮窗，用户选直接下载或加入队列
   $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+  const dt=TYPES[t]||t;
+  // 磁力/种子：先 add 创建任务拿文件信息，再弹预览
+  if(t==='torrent'){
+    const res=await post('/api/add',{url});
+    if(res&&res.ok){showFileModal(res.gid)}
+    else{await customAlert(res?.error||'添加失败')}
+  }else if(t==='m3u8'||v.endsWith('.m3u8')){
+    showDirectPreview({type:'m3u8',title:url.split('/').pop().split('?')[0]||'M3U8流',url:url,m3u8_url:url});
+  }else{
+    // HTTP/FTP 直链、迅雷解码后的直链
+    showDirectPreview({type:t,title:url.split('/').pop().split('?')[0]||'未命名文件',url:url});
+  }
 };
 
 // ---- 粘贴工具函数（Clipboard API → 后端系统剪贴板 → execCommand） ----
@@ -861,6 +854,66 @@ async function doCxAdd(action){
 $('cxDownload').onclick=async()=>{await doCxAdd('download')};
 $('cxQueue').onclick=async()=>{await doCxAdd('queue')};
 $('cxCancel').onclick=hideCxPreview;
+
+// ---- 通用直链/磁力/种子/M3U8 预览浮窗（直接下载 + 加入队列） ----
+function showDirectPreview(data){
+  const card=document.createElement('div');
+  card.className='yt-float-card';
+  const existing=document.querySelectorAll('.yt-float-card');
+  const offset=existing.length*30;
+  card.style.left=Math.min(16+offset,window.innerWidth-360)+'px';
+  card.style.bottom='16px';
+  const badgeCls='badge '+(data.type||'http');
+  const typeLabel=TYPES[data.type]||data.type||'直链';
+  let meta=data.size?('大小: '+data.size):'';
+  if(data.magnet){meta=(meta?meta+' · ':'')+'磁力链接'}
+  card.innerHTML='<div class="row" style="align-items:flex-start">'+
+    '<div style="flex:1;min-width:0">'+
+    '<div style="font-weight:600;font-size:13px;margin-bottom:2px">'+esc(data.title||'未知文件')+' <span class="'+badgeCls+'">'+esc(typeLabel)+'</span></div>'+
+    '<div style="font-size:11px;color:var(--muted)">'+esc(meta)+'</div>'+
+    '</div>'+
+    '<button class="yt-close" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:0 4px">✕</button>'+
+    '</div>'+
+    '<div class="row" style="margin-top:8px;gap:6px">'+
+    '<button class="btn go dl-direct" style="flex:1">直接下载</button>'+
+    '<button class="btn dl-queue">加入队列</button>'+
+    '</div>';
+  const doAdd=async(paused)=>{
+    if(data.type==='torrent'){
+      const res=await post('/api/add',{url:data.magnet||data.url});
+      if(res&&res.ok){card.remove();if(res.type==='torrent'){showFileModal(res.gid)}else{switchTab('tasks')}}
+      else{await customAlert(res?.error||'添加失败')}
+    }else if(data.m3u8_url||data.type==='m3u8'){
+      const res=await post('/api/download_m3u8',{url:data.m3u8_url||data.url,title:data.title,paused});
+      if(res&&res.ok){card.remove();switchTab('tasks')}
+      else{await customAlert(res?.error||'下载失败')}
+    }else{
+      const res=await post('/api/add',{url:data.magnet||data.url});
+      if(res&&res.ok){
+        if(paused){await post('/api/pause',{gid:res.gid})}
+        card.remove();switchTab('tasks');
+      }else{await customAlert(res?.error||'添加失败')}
+    }
+  };
+  card.querySelector('.dl-direct').onclick=()=>doAdd(false);
+  card.querySelector('.dl-queue').onclick=()=>doAdd(true);
+  card.querySelector('.yt-close').onclick=()=>card.remove();
+  let drag=null;
+  card.addEventListener('mousedown',e=>{
+    if(e.target.tagName==='BUTTON'||e.target.classList.contains('yt-close'))return;
+    drag={x:e.clientX-card.offsetLeft,y:e.clientY-card.offsetTop};
+    card.classList.add('dragging');card.style.transition='none';
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!drag)return;
+    card.style.left=Math.max(0,Math.min(e.clientX-drag.x,window.innerWidth-100))+'px';
+    card.style.top=Math.max(0,Math.min(e.clientY-drag.y,window.innerHeight-50))+'px';
+    card.style.bottom='auto';
+  });
+  document.addEventListener('mouseup',()=>{if(!drag)return;drag=null;card.classList.remove('dragging');card.style.transition='';});
+  document.body.appendChild(card);
+  $('url').value='';$('typeHint').style.display='none';window._clipLastText='';
+}
 
 // ---- YouTube/X 视频预览浮窗卡片（支持多个同时存在） ----
 function showYtPreview(data){
