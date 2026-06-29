@@ -369,7 +369,7 @@ window.onerror=function(msg,url,line,col,err){
 <script>
 const $=id=>document.getElementById(id);
 const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
-const UNSUP={quark:1,cloud:1,thunder:1};
+const UNSUP={quark:1,cloud:1};
 let activeTab='tasks';
 let cur=null;
 const openFiles=new Set();  // track which task file lists are expanded
