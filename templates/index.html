@@ -480,10 +480,6 @@ $('addBtn').onclick=async()=>{
     await customAlert('夸克网盘链接需要先在浏览器中转存到自己的网盘，再获取直链下载。',{title:'暂不支持夸克网盘'});
     return;
   }
-  if(v.startsWith('thunder')){
-    await customAlert('迅雷链接请用迅雷客户端下载，或转换为磁力/直链后使用。',{title:'暂不支持迅雷'});
-    return;
-  }
 
   // 本地种子文件路径（/path/to/file.torrent 或 ~/path/file.torrent）
   if(!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent')){

@@ -46,6 +46,22 @@ app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
 # --------------------------------------------------------------------------- #
 #  Link classification
 # --------------------------------------------------------------------------- #
+def _decode_thunder(url):
+    """解码迅雷链接。thunder://QUF... Base64 解码后去掉首尾 AA/ZZ 标记得到真实 URL。"""
+    try:
+        payload = url[len("thunder://"):].strip()
+        # 去掉可能的 query 参数
+        if "?" in payload:
+            payload = payload.split("?")[0]
+        decoded = base64.b64decode(payload).decode('utf-8', errors='replace')
+        # 迅雷格式: AA + 真实URL + ZZ
+        if decoded.startswith("AA") and decoded.endswith("ZZ"):
+            decoded = decoded[2:-2]
+        return decoded.strip()
+    except Exception:
+        return None
+
+
 def classify(url):
     # 从分享文本中提取真实 URL（抖音/快手/小红书 App 分享带口令前缀）
     m = re.search(r'https?://[^\s"<>\']+', url)
@@ -120,6 +136,9 @@ def classify(url):
     if u.startswith("ed2k://"):
         return "ed2k"
     if u.startswith("thunder://"):
+        decoded = _decode_thunder(url)
+        if decoded:
+            return classify(decoded)
         return "thunder"
     return "http"  # default: treat as direct link
 
@@ -1535,11 +1554,10 @@ TYPES = {
     "m3u8": "M3U8 流媒体",
     "direct": "直接视频",
 }
-UNSUPPORTED = {"quark", "cloud", "thunder"}
+UNSUPPORTED = {"quark", "cloud"}
 UNSUPPORTED_MSG = {
     "quark": "夸克网盘链接需要先在浏览器中转存到自己的网盘，再获取直链下载。",
     "cloud": "网盘链接需要先在浏览器中转存，再获取直链下载。",
-    "thunder": "迅雷链接请用迅雷客户端下载，或转换为磁力/直链后使用。",
 }
 
 # Public BitTorrent trackers to maximize peer discovery for magnet links
@@ -2378,6 +2396,11 @@ class Engine:
 
     # ---- API actions --------------------------------------------------------
     def add(self, url):
+        # 迅雷链接解码为真实 URL
+        if url.strip().lower().startswith("thunder://"):
+            decoded = _decode_thunder(url)
+            if decoded:
+                url = decoded
         t = classify(url)
         if t in UNSUPPORTED:
             return {"ok": False, "error": UNSUPPORTED_MSG[t], "type": t}
