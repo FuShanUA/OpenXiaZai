@@ -42,6 +42,27 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
             static_folder=os.path.join(BASE_DIR, "static"))
 
+# Browser-like User-Agent for aria2 HTTP downloads (fixes 403 from masuit.net etc.)
+HTTP_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+
+
+def _detect_cloudflare(url):
+    """Quick HEAD request to check if the URL is behind Cloudflare's bot protection.
+    Returns True if Cloudflare challenge is detected (aria2 would get 403)."""
+    try:
+        r = requests.head(url, timeout=10, allow_redirects=True, headers={
+            'User-Agent': HTTP_UA,
+        })
+        if r.status_code == 403:
+            if 'cf-mitigated' in r.headers:
+                return True
+            if 'cloudflare' in r.headers.get('server', '').lower():
+                return True
+        return False
+    except Exception:
+        return False
+
 
 # --------------------------------------------------------------------------- #
 #  Link classification
@@ -2328,6 +2349,8 @@ class Engine:
         self._yt_counter = 0
         self.bili_tasks = {}    # gid -> {url, title, state, progress, ...}
         self._bili_counter = 0
+        self.cf_tasks = {}      # gid -> Cloudflare browser downloads
+        self._cf_counter = 0
         self._format_m3u8_map = {}  # (url, format_id) -> direct video URL
 
     def _start_aria2(self):
@@ -2342,6 +2365,7 @@ class Engine:
             "--split=16", "--min-split-size=1M", "--continue=true",
             "--allow-overwrite=true", "--auto-file-renaming=false",
             "--file-allocation=none", "--bt-metadata-only=false",
+            "--user-agent=" + HTTP_UA,
             # DHT & peer discovery - critical for fast magnet link resolution
             "--enable-dht=true", "--dht-listen-port=6881-6999",
             "--dht-message-timeout=8",
@@ -2464,6 +2488,23 @@ class Engine:
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
+        if t == "http":
+            from urllib.parse import urlparse, unquote
+            _parsed = urlparse(url)
+            _referer = f"{_parsed.scheme}://{_parsed.netloc}/" if _parsed.scheme else ""
+            opts["header"] = [f"User-Agent: {HTTP_UA}", f"Referer: {_referer}"]
+            if _detect_cloudflare(url):
+                gid = "cf_%d_%d" % (int(time.time()), self._cf_counter)
+                self._cf_counter += 1
+                filename = unquote(url.split("/")[-1].split("?")[0])
+                self.cf_tasks[gid] = {
+                    "url": url, "title": filename, "state": "downloading",
+                    "progress": 0, "size": 0, "output": "", "added_at": time.time(),
+                }
+                threading.Thread(target=self._download_via_browser_thread,
+                                 args=(url, gid), daemon=True).start()
+                log.info("[API /api/add] Cloudflare detected, starting browser download gid=%s" % gid)
+                return {"ok": True, "gid": gid, "type": "cf", "name": filename}
         existing_files = []
         # 本地 .torrent 文件 → 直接读取内容，交给 aria2.addTorrent
         if t == "torrent_file":
@@ -2661,6 +2702,228 @@ class Engine:
         info = self.tasks.get(gid)
         real_gid = info.get("converted_to", gid) if info else gid
         return self.aria.resume(real_gid)
+
+    def retry_download(self, gid):
+        """Retry a failed or completed aria2 task by re-adding the URL."""
+        info = self.tasks.get(gid)
+        real_gid = info.get("converted_to", gid) if info else gid
+        try:
+            s = self.aria.status(real_gid)
+            st = s.get("status", "")
+        except Exception:
+            st = "removed"
+        if st == "paused":
+            return {"ok": self.aria.resume(real_gid)}
+        url = info.get("url", "") if info else ""
+        if not url:
+            return {"ok": False, "error": "任务信息已丢失，无法重试"}
+        t = info.get("type", classify(url))
+        opts = {"dir": self.save_path,
+                "max-connection-per-server": str(self.connections),
+                "split": str(self.connections)}
+        if t == "http":
+            from urllib.parse import urlparse
+            _parsed = urlparse(url)
+            _referer = f"{_parsed.scheme}://{_parsed.netloc}/" if _parsed.scheme else ""
+            opts["header"] = [f"User-Agent: {HTTP_UA}", f"Referer: {_referer}"]
+        try:
+            try:
+                self.aria.remove(real_gid)
+            except Exception:
+                pass
+            if real_gid != gid:
+                try:
+                    self.aria.remove(gid)
+                except Exception:
+                    pass
+            new_gid = self.aria.add(url, opts)
+            self.tasks[new_gid] = {"type": t, "url": url, "submitted": True,
+                                   "picked": False, "pending": False,
+                                   "added_at": time.time()}
+            self.tasks.pop(gid, None)
+            self.tasks.pop(real_gid, None)
+            log.info("[retry_download] re-added url=%s old_gid=%s new_gid=%s" % (url[:80], gid, new_gid))
+            return {"ok": True, "gid": new_gid}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _download_via_browser_thread(self, url, gid):
+        """Background thread: download a Cloudflare-protected file via hidden browser.
+        Uses Playwright's bundled Chromium (separate from user's Chrome) with
+        AppleScript to hide the process. Polls .crdownload file for progress."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.cf_tasks[gid]['state'] = 'error'
+            self.cf_tasks[gid]['error'] = '需要安装 Playwright'
+            return
+
+        import tempfile, shutil, subprocess
+        tmp_profile = tempfile.mkdtemp(prefix="cf_dl_")
+        download_dir = tempfile.mkdtemp(prefix="cf_dlfiles_")
+
+        try:
+            with sync_playwright() as p:
+                context = p.chromium.launch_persistent_context(
+                    tmp_profile, headless=False,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--window-position=-32000,-32000",
+                        "--window-size=1,1",
+                        "--no-first-run", "--mute-audio",
+                    ],
+                )
+                page = context.new_page()
+                page.on("popup", lambda p: p.close())
+
+                # Hide "Google Chrome for Testing" process completely
+                subprocess.run([
+                    "osascript", "-e",
+                    'tell application "System Events" to set visible of '
+                    'process "Google Chrome for Testing" to false'
+                ], capture_output=True, timeout=5)
+
+                try:
+                    cdp = context.new_cdp_session(page)
+                    cdp.send("Page.setDownloadBehavior", {
+                        "behavior": "allow",
+                        "downloadPath": download_dir,
+                    })
+                except Exception:
+                    pass
+
+                self.cf_tasks[gid].update({"state": "fetching"})
+
+                # Get total file size via a separate page's fetch
+                _total_size = 0
+                try:
+                    from urllib.parse import urlparse
+                    _parsed = urlparse(url)
+                    _base = f"{_parsed.scheme}://{_parsed.netloc}/"
+                    page2 = context.new_page()
+                    page2.goto(_base, wait_until="domcontentloaded", timeout=30000)
+                    page2.wait_for_timeout(5000)
+                    _cl = page2.evaluate(
+                        "async (url) => {"
+                        "  try {"
+                        "    const r = await fetch(url, {method: 'HEAD'});"
+                        "    return r.headers.get('content-length') || '0';"
+                        "  } catch(e) { return '0'; }"
+                        "}",
+                        url
+                    )
+                    if _cl and _cl != '0':
+                        _total_size = int(_cl)
+                        log.info("[cf_download] total size=%d via fetch" % _total_size)
+                    page2.close()
+                except Exception as e:
+                    log.warning("[cf_download] could not get total size: %s" % str(e)[:100])
+                    try:
+                        page2.close()
+                    except Exception:
+                        pass
+                self.cf_tasks[gid]['_total_size'] = _total_size
+
+                # Re-set CDP download behavior
+                try:
+                    cdp.send("Page.setDownloadBehavior", {
+                        "behavior": "allow",
+                        "downloadPath": download_dir,
+                    })
+                except Exception:
+                    pass
+
+                # Navigate to download URL
+                log.info("[cf_download] navigating to download URL gid=%s" % gid)
+                try:
+                    page.goto(url, wait_until="commit", timeout=30000)
+                except Exception:
+                    pass
+
+                # Poll .crdownload file for progress
+                last_size = 0
+                stable_count = 0
+                filename = None
+
+                for _ in range(1800):
+                    try:
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        break
+
+                    files = [f for f in os.listdir(download_dir)
+                             if not f.startswith('.')] if os.path.exists(download_dir) else []
+
+                    if not files:
+                        continue
+
+                    crdownload_files = [f for f in files if f.endswith('.crdownload')]
+                    done_files = [f for f in files if not f.endswith('.crdownload')]
+
+                    if done_files:
+                        filename = done_files[0]
+                        final_path = os.path.join(download_dir, filename)
+                        file_size = os.path.getsize(final_path)
+                        self.cf_tasks[gid].update({
+                            "state": "finished", "output": final_path,
+                            "size": file_size, "progress": 100, "title": filename,
+                        })
+                        log.info("[cf_download] FINISHED gid=%s file=%s size=%d" % (gid, filename, file_size))
+                        break
+
+                    if crdownload_files:
+                        filename = crdownload_files[0][:-len('.crdownload')]
+                        current_size = os.path.getsize(os.path.join(download_dir, crdownload_files[0]))
+                        _total = self.cf_tasks[gid].get('_total_size', 0)
+                        _pct = round(100 * current_size / _total, 1) if _total else 0
+                        self.cf_tasks[gid].update({
+                            "state": "downloading", "title": filename,
+                            "size": _total or current_size,
+                            "completed_size": current_size, "progress": _pct,
+                        })
+                        if current_size == last_size:
+                            stable_count += 1
+                        else:
+                            stable_count = 0
+                        last_size = current_size
+                        if stable_count > 60:
+                            log.warning("[cf_download] stalled gid=%s at %d bytes" % (gid, current_size))
+                    else:
+                        stable_count = 0
+                else:
+                    raise Exception("Download timed out (15 minutes)")
+
+                # Move file to save directory
+                if filename:
+                    final_path = os.path.join(download_dir, filename)
+                    save_path = os.path.join(self.save_path, filename)
+                    if os.path.exists(final_path):
+                        shutil.move(final_path, save_path)
+                        self.cf_tasks[gid]["output"] = save_path
+                        log.info("[cf_download] moved to %s" % save_path)
+
+                context.close()
+        except Exception as e:
+            log.error("[cf_download] FAILED gid=%s: %s" % (gid, str(e)))
+            self.cf_tasks[gid]['state'] = 'error'
+            self.cf_tasks[gid]['error'] = str(e)
+        finally:
+            shutil.rmtree(tmp_profile, ignore_errors=True)
+            shutil.rmtree(download_dir, ignore_errors=True)
+
+    def stop_cf_download(self, gid, skip_trash=False):
+        """Stop a Cloudflare browser download."""
+        info = self.cf_tasks.get(gid)
+        if not info:
+            return
+        if not skip_trash:
+            self.records["trash"].insert(0, {
+                "gid": gid, "type": "cf", "name": info.get('title', '文件下载'),
+                "url": info.get('url', ''), "dir": self.save_path,
+                "paths": [], "size": 0, "completed_at": int(time.time()),
+            })
+            self._save_records()
+        info['state'] = 'removed'
 
     def stop(self, gid, skip_trash=False):
         info = self.tasks.get(gid)
@@ -2992,6 +3255,43 @@ class Engine:
                 "metadata_progress": 0,
                 "added_at": info.get('added_at', 0),
             })
+        # Cloudflare browser download tasks
+        for gid, info in list(self.cf_tasks.items()):
+            if info.get('state') == 'removed':
+                continue
+            state = info.get('state', 'downloading')
+            output = info.get('output', '')
+            if state == 'finished':
+                if gid not in existing:
+                    existing.add(gid)
+                    self.records["history"].insert(0, {
+                        "gid": gid, "type": "cf", "name": info.get('title', '文件下载'),
+                        "url": info.get('url', ''), "dir": self.save_path,
+                        "paths": [output] if output else [],
+                        "size": info.get('size', 0), "completed_at": int(time.time()),
+                    })
+                del self.cf_tasks[gid]
+                continue
+            items.append({
+                "gid": gid,
+                "type": "cf",
+                "name": info.get('title', '文件下载'),
+                "state": state,
+                "progress": info.get('progress', 0),
+                "size": info.get('size', 0),
+                "completed_size": info.get('completed_size', 0),
+                "download_rate": 0,
+                "upload_rate": 0,
+                "peers": 0,
+                "seeds": 0,
+                "dir": self.save_path,
+                "files": [],
+                "paths": [output] if output else [],
+                "url": info.get('url', ''),
+                "has_metadata": True,
+                "metadata_progress": 0,
+                "added_at": info.get('added_at', 0),
+            })
         return {
             "settings": {
                 "max_active": self.max_active,
@@ -3103,6 +3403,9 @@ class Engine:
         # 停止所有 Bilibili 下载
         for gid in list(self.bili_tasks.keys()):
             self.stop_bili_download(gid, skip_trash=True)
+        # 停止所有 Cloudflare 浏览器下载
+        for gid in list(self.cf_tasks.keys()):
+            self.stop_cf_download(gid, skip_trash=True)
 
     def clear_all_history(self):
         """Move all history records to trash."""
@@ -4575,6 +4878,8 @@ def api_pause():
         return jsonify(ok=False, error="yt-dlp 下载不支持暂停")
     if gid and gid.startswith("bili_"):
         return jsonify(ok=False, error="B站视频下载不支持暂停")
+    if gid and gid.startswith("cf_"):
+        return jsonify(ok=False, error="浏览器下载不支持暂停")
     return jsonify(ok=engine.pause(data.get("gid")))
 
 
@@ -4584,6 +4889,8 @@ def api_resume():
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.resume_m3u8_download(gid))
+    if gid and gid.startswith("cf_"):
+        return jsonify(ok=False, error="浏览器下载不支持暂停/恢复")
     return jsonify(ok=engine.resume(data.get("gid")))
 
 
@@ -4601,8 +4908,20 @@ def api_retry():
         return jsonify(ok=False, error="任务信息已丢失，无法重试")
     elif gid and gid.startswith("bili_"):
         return jsonify(ok=False, error="B站任务请重新添加链接下载")
+    elif gid and gid.startswith("cf_"):
+        info = engine.cf_tasks.get(gid, {})
+        url = info.get('url', '')
+        if url:
+            info['state'] = 'downloading'
+            info['progress'] = 0
+            info['output'] = ''
+            info.pop('error', None)
+            threading.Thread(target=engine._download_via_browser_thread,
+                             args=(url, gid), daemon=True).start()
+            return jsonify(ok=True)
+        return jsonify(ok=False, error="任务信息已丢失，无法重试")
     else:
-        return jsonify(ok=engine.resume(gid))
+        return jsonify(engine.retry_download(gid))
 
 
 @app.route("/api/stop", methods=["POST"])
@@ -4616,6 +4935,8 @@ def api_stop():
         engine.stop_yt_download(gid, skip_trash=skip_trash)
     elif gid and gid.startswith("bili_"):
         engine.stop_bili_download(gid, skip_trash=skip_trash)
+    elif gid and gid.startswith("cf_"):
+        engine.stop_cf_download(gid, skip_trash=skip_trash)
     else:
         engine.stop(gid, skip_trash=skip_trash)
     return jsonify(ok=True)

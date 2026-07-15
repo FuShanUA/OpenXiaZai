@@ -1567,7 +1567,7 @@ function renderTask(t){
   }
   html+='<div class="row" style="margin-top:10px">';
   if(t.state==='downloading'||t.state==='fetching'||t.state==='queued'){
-    if(t.gid&&t.gid.startsWith('yt_')){
+    if(t.gid&&(t.gid.startsWith('yt_')||t.gid.startsWith('cf_'))){
       html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止</button>';
     }else{
       html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
