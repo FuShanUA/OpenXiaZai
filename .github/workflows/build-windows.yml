@@ -40,8 +40,10 @@ jobs:
           Copy-Item $exe.FullName .
           Remove-Item -Recurse ffmpeg.zip, ffmpeg_tmp
 
-      - name: Build EXE
-        run: python build.py win
+     - name: Build EXE
+        env:
+          PYTHONUTF8: '1'
+       run: python build.py win
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

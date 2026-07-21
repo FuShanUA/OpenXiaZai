@@ -6,6 +6,14 @@ Win:    pip install pyinstaller && python build.py win
 
 import os, sys, shutil, subprocess, platform
 
+# Fix Windows console encoding for Chinese output
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")
