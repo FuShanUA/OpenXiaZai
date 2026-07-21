@@ -235,24 +235,29 @@ def build_win():
 
     clean()
 
-    binaries = [f"(_sp(aria2), '.')"]
-    if ffmpeg:
-        binaries.append(f"(_sp(ffmpeg), '.')")
+    # Pre-convert all paths to forward slashes to avoid backslash escaping in spec
+    _launcher = os.path.join(ROOT, "launcher.py").replace("\\", "/")
+    _root = ROOT.replace("\\", "/")
+    _templates = os.path.join(ROOT, "templates").replace("\\", "/")
+    _static = os.path.join(ROOT, "static").replace("\\", "/")
+    _icon = ICON_WIN.replace("\\", "/")
+    _aria2 = aria2.replace("\\", "/")
+    _ffmpeg = ffmpeg.replace("\\", "/") if ffmpeg else None
 
-    # 生成 spec（Windows 不需要 BUNDLE，直接出 exe 即可）
+    binaries = [f"('{_aria2}', '.')"]
+    if _ffmpeg:
+        binaries.append(f"('{_ffmpeg}', '.')")
+
     spec = f"""# -*- mode: python ; coding: utf-8 -*-
 import os, sys
 
-def _sp(p):
-    return p.replace("\\", "/")
-
 a = Analysis(
-    [_sp('{os.path.join(ROOT, "launcher.py")}')],
-    pathex=[_sp('{ROOT}')],
+    ['{_launcher}'],
+    pathex=['{_root}'],
     binaries=[{", ".join(binaries)}],
     datas=[
-        (_sp('{os.path.join(ROOT, "templates")}'), 'templates'),
-        (_sp('{os.path.join(ROOT, "static")}'), 'static'),
+        ('{_templates}', 'templates'),
+        ('{_static}', 'static'),
     ],
     hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
     hookspath=[],
@@ -280,7 +285,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=_sp('{ICON_WIN}'),
+    icon='{_icon}',
 )
 """
     spec_path = os.path.join(ROOT, "win.spec")
