@@ -100,7 +100,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'numpy', 'pandas', 'PIL', 'scipy'],
+    excludes=['tkinter', 'matplotlib', 'numpy', 'pandas', 'scipy'],
 )
 
 pyz = PYZ(a.pure)
@@ -263,7 +263,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'numpy', 'pandas', 'PIL', 'scipy'],
+    excludes=['tkinter', 'matplotlib', 'numpy', 'pandas', 'scipy'],
 )
 
 pyz = PYZ(a.pure)
