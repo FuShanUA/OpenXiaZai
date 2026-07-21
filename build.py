@@ -211,6 +211,10 @@ def _download_ffmpeg():
         return target
     return None
 
+def _sp(path):
+    """Normalize path for spec file: forward slashes to avoid backslash escaping issues."""
+    return path.replace("\\", "/")
+
 def build_win():
     print("=" * 50)
     print("  构建 Windows .exe")
@@ -231,21 +235,24 @@ def build_win():
 
     clean()
 
-    binaries = [f"('{aria2}', '.')"]
+    binaries = [f"(_sp(aria2), '.')"]
     if ffmpeg:
-        binaries.append(f"('{ffmpeg}', '.')")
+        binaries.append(f"(_sp(ffmpeg), '.')")
 
     # 生成 spec（Windows 不需要 BUNDLE，直接出 exe 即可）
     spec = f"""# -*- mode: python ; coding: utf-8 -*-
 import os, sys
 
+def _sp(p):
+    return p.replace("\\", "/")
+
 a = Analysis(
-    ['{os.path.join(ROOT, "launcher.py")}'],
-    pathex=['{ROOT}'],
+    [_sp('{os.path.join(ROOT, "launcher.py")}')],
+    pathex=[_sp('{ROOT}')],
     binaries=[{", ".join(binaries)}],
     datas=[
-        ('{os.path.join(ROOT, "templates")}', 'templates'),
-        ('{os.path.join(ROOT, "static")}', 'static'),
+        (_sp('{os.path.join(ROOT, "templates")}'), 'templates'),
+        (_sp('{os.path.join(ROOT, "static")}'), 'static'),
     ],
     hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
     hookspath=[],
@@ -273,7 +280,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='{ICON_WIN}',
+    icon=_sp('{ICON_WIN}'),
 )
 """
     spec_path = os.path.join(ROOT, "win.spec")
