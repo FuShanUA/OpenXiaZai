@@ -18,6 +18,28 @@ IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Windows: suppress console windows for ALL subprocess calls.
+# Without this, every subprocess.Popen/run spawns a flashing cmd.exe window.
+if IS_WINDOWS:
+    _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
+    _OrigPopen = subprocess.Popen
+    class _Popen(_OrigPopen):
+        def __init__(self, *args, **kwargs):
+            if "creationflags" in kwargs:
+                kwargs["creationflags"] |= _NO_WINDOW
+            else:
+                kwargs["creationflags"] = _NO_WINDOW
+            super().__init__(*args, **kwargs)
+    subprocess.Popen = _Popen
+    _orig_run = subprocess.run
+    def _patched_run(*args, **kwargs):
+        if "creationflags" in kwargs:
+            kwargs["creationflags"] |= _NO_WINDOW
+        else:
+            kwargs["creationflags"] = _NO_WINDOW
+        return _orig_run(*args, **kwargs)
+    subprocess.run = _patched_run
+
 def _downloads_dir():
     """Return the OS-appropriate Downloads directory."""
     if IS_WINDOWS:
@@ -88,13 +110,13 @@ RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
 
 import logging
 LOG_FILE = os.path.join(BASE_DIR, "debug.log")
+_log_handlers = [logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')]
+if sys.stderr is not None:
+    _log_handlers.append(logging.StreamHandler())
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8'),
-        logging.StreamHandler(),
-    ]
+    handlers=_log_handlers,
 )
 log = logging.getLogger("OpenXiaZai")
 # Suppress noisy HTTP request logs

@@ -11,6 +11,12 @@ import threading
 # 确保能 import 同目录的 app 模块(打包后同样生效)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Windows + console=False: stdout/stderr are None, redirect to log file to prevent crashes
+if sys.platform == "win32" and sys.stdout is None:
+    _log_dir = tempfile.gettempdir()
+    sys.stdout = open(os.path.join(_log_dir, "openxiazai_stdout.log"), "w", encoding="utf-8")
+    sys.stderr = open(os.path.join(_log_dir, "openxiazai_stderr.log"), "w", encoding="utf-8")
+
 import webview
 from app import app, engine, DEFAULT_SAVE
 
