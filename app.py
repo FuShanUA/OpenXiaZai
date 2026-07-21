@@ -11,17 +11,79 @@ import threading
 import requests
 from flask import Flask, request, jsonify, render_template, Response
 
-# Ensure yt_dlp can be found: check common locations
-_venv_ytdlp = os.path.join(os.path.expanduser("~"), "cc", ".venv", "lib")
-if os.path.isdir(_venv_ytdlp):
-    # Find the actual site-packages dir (version-dependent)
-    for _sub in os.listdir(_venv_ytdlp):
-        _sp = os.path.join(_venv_ytdlp, _sub, "site-packages")
-        if os.path.isdir(_sp) and _sp not in sys.path:
-            sys.path.insert(0, _sp)
-
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SAVE = os.path.expanduser("~/Downloads/OpenXiaZai")
+
+def _downloads_dir():
+    """Return the OS-appropriate Downloads directory."""
+    if IS_WINDOWS:
+        return os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Downloads", "OpenXiaZai")
+    return os.path.expanduser("~/Downloads/OpenXiaZai")
+
+def _chrome_profile_path():
+    """Return the Chrome user-data directory for the current platform."""
+    if IS_WINDOWS:
+        return os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data")
+    if IS_MACOS:
+        return os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    # Linux
+    return os.path.expanduser("~/.config/google-chrome")
+
+def _find_binary(name):
+    """Locate a binary: bundled > system PATH > known install dirs."""
+    # Check bundled copy next to this script (PyInstaller bundles land here)
+    local = os.path.join(BASE_DIR, name + (".exe" if IS_WINDOWS else ""))
+    if os.path.isfile(local):
+        return local
+    p = shutil.which(name)
+    if p:
+        return p
+    # macOS Homebrew paths
+    for prefix in ["/opt/homebrew/bin", "/usr/local/bin"]:
+        cand = os.path.join(prefix, name)
+        if os.path.isfile(cand):
+            return cand
+    # Windows common install paths
+    if IS_WINDOWS:
+        for env_var in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"]:
+            base = os.environ.get(env_var, "")
+            if not base:
+                continue
+            for sub in [name, name + "\\" + name]:
+                cand = os.path.join(base, sub, name + ".exe")
+                if os.path.isfile(cand):
+                    return cand
+            # scoop / chocolatey
+            for pkg_dir in ["scoop\\apps", "chocolatey\\bin"]:
+                cand = os.path.join(base, pkg_dir, name, "current", name + ".exe")
+                if os.path.isfile(cand):
+                    return cand
+                cand = os.path.join(base, pkg_dir, name + ".exe")
+                if os.path.isfile(cand):
+                    return cand
+    return name  # fall back to bare name (relies on PATH)
+
+# Pre-resolve binary paths for subprocess calls (bundled or system)
+_FFMPEG = _find_binary("ffmpeg")
+_ARIA2C = _find_binary("aria2c")
+
+# Ensure yt_dlp can be found: check common locations (macOS venv, Windows, etc.)
+for _venv_base in [
+    os.path.join(os.path.expanduser("~"), "cc", ".venv", "lib"),   # macOS dev
+    os.path.join(sys.prefix, "Lib", "site-packages"),                  # Windows venv
+    os.path.join(os.path.expanduser("~"), ".venv", "lib"),           # generic venv
+]:
+    if os.path.isdir(_venv_base):
+        for _sub in os.listdir(_venv_base):
+            _sp = os.path.join(_venv_base, _sub, "site-packages") if _sub != "site-packages" else _venv_base
+            if os.path.isdir(_sp) and _sp not in sys.path:
+                sys.path.insert(0, _sp)
+
+DEFAULT_SAVE = _downloads_dir()
 RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
 
 import logging
@@ -43,8 +105,36 @@ app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
             static_folder=os.path.join(BASE_DIR, "static"))
 
 # Browser-like User-Agent for aria2 HTTP downloads (fixes 403 from masuit.net etc.)
-HTTP_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+if IS_WINDOWS:
+    HTTP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+    CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+else:
+    HTTP_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+    CHROME_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def _download_segment(url, path, ua, referer, cookie, timeout=30):
+    """Download a URL to a file using requests (cross-platform, no curl dependency).
+    Returns (ok, size) where ok=True if download succeeded with >1KB file."""
+    try:
+        resp = requests.get(url, headers={
+            'User-Agent': ua,
+            'Referer': referer,
+            'Cookie': cookie[:400],
+        }, timeout=timeout, stream=True)
+        if resp.status_code == 200:
+            with open(path, 'wb') as f:
+                for chunk in resp.iter_content(8192):
+                    f.write(chunk)
+            sz = os.path.getsize(path) if os.path.exists(path) else 0
+            return sz > 1000, sz
+    except Exception:
+        pass
+    return False, 0
 
 
 def _detect_cloudflare(url):
@@ -240,14 +330,11 @@ def _launch_playwright_context():
     import tempfile as _tempfile
 
     p = sync_playwright().start()
-    chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    chrome_profile = _chrome_profile_path()
     context = None
     tmp_profile = None
 
-    STEALTH_UA = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-    )
+    STEALTH_UA = HTTP_UA
     STEALTH_ARGS = [
         "--disable-blink-features=AutomationControlled",
         "--no-first-run", "--no-default-browser-check",
@@ -338,8 +425,7 @@ def _launch_lightweight_browser():
         return None, None
     try:
         p = sync_playwright().start()
-        UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        UA = CHROME_UA
         browser = p.chromium.launch(headless=True, args=[
             "--disable-blink-features=AutomationControlled",
             "--no-first-run", "--no-default-browser-check",
@@ -393,7 +479,7 @@ def _get_cookies_via_playwright(url):
 
     try:
         with sync_playwright() as p:
-            chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+            chrome_profile = _chrome_profile_path()
             context = None
 
             if os.path.exists(chrome_profile):
@@ -504,7 +590,7 @@ def _extract_douyin_from_page(context, url):
             try:
                 log.info("[Douyin] Resolving short link %s..." % url[:60])
                 rr = requests.head(url, headers={
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                    'User-Agent': HTTP_UA
                 }, timeout=8, allow_redirects=True, proxies={'http': None, 'https': None})
                 if rr.url:
                     final_url = rr.url
@@ -840,7 +926,7 @@ def _extract_with_playwright(url):
 
     try:
         with sync_playwright() as p:
-            chrome_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+            chrome_profile = _chrome_profile_path()
             context = None
 
             if os.path.exists(chrome_profile):
@@ -1013,13 +1099,23 @@ def _cleanup_chromium():
     """清理残留的 Playwright Chromium 子进程，避免堆积导致新进程启动卡死或服务崩溃。
     只清路径含 ms-playwright 的进程（Playwright 自带 chromium），不碰用户的 Chrome。"""
     try:
-        out = subprocess.run(['pgrep', '-f', 'ms-playwright'],
-                             capture_output=True, text=True, timeout=3).stdout
-        for pid in out.split():
-            try:
-                os.kill(int(pid), 9)
-            except Exception:
-                pass
+        if IS_WINDOWS:
+            ps_cmd = (
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.CommandLine -like '*ms-playwright*' } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+            )
+            subprocess.run(
+                ['powershell', '-Command', ps_cmd],
+                capture_output=True, timeout=5)
+        else:
+            out = subprocess.run(['pgrep', '-f', 'ms-playwright'],
+                                 capture_output=True, text=True, timeout=3).stdout
+            for pid in out.split():
+                try:
+                    os.kill(int(pid), 9)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -1037,11 +1133,11 @@ def _grab_stream_subprocess(platform, url):
         # 用 Popen + start_new_session 而非 subprocess.run：chromium 孙进程会继承
         # pipe fd 导致 communicate() 卡死等不到 EOF。start_new_session 让子进程独立
         # 成会话，轮询读 stdout 拿到结果后 killpg 杀整个进程组（含 chromium）。
-        import signal
         proc = subprocess.Popen(
             [sys.executable, script, platform, url],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            start_new_session=True, close_fds=True, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            **({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+               else {'start_new_session': True, 'close_fds': True}))
         result_line = None
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -1058,13 +1154,24 @@ def _grab_stream_subprocess(platform, url):
         # 拿到结果后杀整个进程组（含 chromium 孙进程），避免 os._exit 漏掉子进程。
         # start_new_session=True 保证 proc.pid 就是进程组长，killpg 只影响这个组，
         # 不会误杀主进程。grab_stream.py 自己也会 killpg 自杀，这里双保险。
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
+        if IS_WINDOWS:
             try:
-                proc.kill()
+                subprocess.run(f'taskkill /f /t /pid {proc.pid}',
+                               shell=True, capture_output=True, timeout=5)
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        else:
+            import signal
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
         if result_line:
             try:
                 return json.loads(result_line)
@@ -1499,7 +1606,7 @@ def extract_video(url):
     from urllib.parse import urljoin
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        'User-Agent': HTTP_UA
     }
 
     try:
@@ -1661,8 +1768,7 @@ DHT_ENTRY_POINTS = [
 # --------------------------------------------------------------------------- #
 
 BILI_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': CHROME_UA,
     'Referer': 'https://www.bilibili.com',
 }
 
@@ -1676,8 +1782,7 @@ BILI_AUDIO_MAP = {30250: '杜比全景声', 30251: 'Hi-Res', 30232: '192Kbps', 3
 
 # B站扫码登录 — 生成二维码、轮询扫码状态、自动保存Cookie
 BILI_QR_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': CHROME_UA,
     'Referer': 'https://passport.bilibili.com',
     'Origin': 'https://passport.bilibili.com',
 }
@@ -2281,7 +2386,7 @@ def search_magnet_for_ed2k(file_name, file_size):
                     }
 
     # ---- Strategy 2: Direct requests (fallback, likely blocked by Cloudflare) ----
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
+    headers = {'User-Agent': HTTP_UA}
 
     # DuckDuckGo search → visit result pages
     ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_query)}+magnet+torrent"
@@ -2355,7 +2460,7 @@ class Engine:
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
-        aria2c = shutil.which("aria2c") or "aria2c"
+        aria2c = _ARIA2C
         args = [
             aria2c, "--enable-rpc", f"--rpc-listen-port={self.aria.port}",
             "--rpc-listen-all=false", "--rpc-allow-origin-all",
@@ -2530,7 +2635,7 @@ class Engine:
         if t == "torrent_url":
             try:
                 r = requests.get(url.strip(), timeout=30, headers={
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                    'User-Agent': HTTP_UA
                 })
                 if r.status_code != 200 or len(r.content) < 100:
                     return {"ok": False, "error": f"下载种子文件失败（HTTP {r.status_code}）", "type": t}
@@ -2604,7 +2709,7 @@ class Engine:
         for src in sources:
             try:
                 r = requests.get(src, timeout=15, headers={
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                    'User-Agent': HTTP_UA
                 })
                 if r.status_code == 200 and len(r.content) > 100:
                     torrent_path = os.path.join(self.save_path, info_hash.lower() + ".torrent")
@@ -3521,7 +3626,7 @@ class Engine:
         self.m3u8_tasks[gid] = info
 
         cmd = [
-            'ffmpeg', '-y',
+            _FFMPEG, '-y',
         ]
         if resume_from > 0:
             cmd += ['-ss', str(resume_from)]
@@ -3584,7 +3689,7 @@ class Engine:
                         f.write(f"file '{part1_path}'\n")
                         f.write(f"file '{part2_path}'\n")
                     final_path = output_path.replace('.mp4', '_merged.mp4')
-                    concat_cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                    concat_cmd = [_FFMPEG, '-y', '-f', 'concat', '-safe', '0',
                                   '-i', concat_list, '-c', 'copy', '-movflags', '+faststart', final_path]
                     result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=300)
                     if result.returncode == 0:
@@ -3963,6 +4068,12 @@ class Engine:
         existing = self.yt_tasks.get(gid, {})
         if existing.get('type'):
             info['type'] = existing['type']
+        # Preserve flags needed for resume and format selection
+        for k in ('_resuming', '_is_audio_only', '_stream_data'):
+            if existing.get(k):
+                info[k] = existing[k]
+        if existing.get('_resuming'):
+            info['added_at'] = existing.get('added_at', time.time())
         self.yt_tasks[gid] = info
 
         # For Douyin/Kuaishou: extract a fresh direct URL before downloading
@@ -4003,6 +4114,8 @@ class Engine:
             if gid not in self.yt_tasks:
                 return
             task = self.yt_tasks[gid]
+            if task.get('_pause_requested'):
+                raise Exception('PAUSE_REQUESTED')
             if d['status'] == 'downloading':
                 downloaded = d.get('downloaded_bytes', 0) or 0
                 total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0) or 0
@@ -4029,7 +4142,7 @@ class Engine:
             'no_warnings': True,
             'progress_hooks': [progress_hook],
             'outtmpl': output_template,
-            'overwrites': True,
+            'overwrites': not self.yt_tasks.get(gid, {}).get('_resuming', False),
         }
         # Never merge more than one audio stream: a combined format (video+audio)
         # plus a stray "bestaudio" would otherwise pick up a dubbed track and embed
@@ -4063,7 +4176,7 @@ class Engine:
             }.get(t, "")
             ydl_opts['http_headers'] = {
                 'Referer': referer,
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'User-Agent': CHROME_UA,
             }
             ydl_opts['proxy'] = ''
             ydl_opts['socket_timeout'] = 20
@@ -4122,6 +4235,11 @@ class Engine:
                                 task['size'] = os.path.getsize(task['output'])
                 return  # Success, don't retry
             except Exception as e:
+                if str(e) == 'PAUSE_REQUESTED':
+                    if gid in self.yt_tasks:
+                        self.yt_tasks[gid]['state'] = 'paused'
+                        self.yt_tasks[gid].pop('_resuming', None)
+                    return
                 last_error = e
                 if gid not in self.yt_tasks:
                     return
@@ -4161,29 +4279,24 @@ class Engine:
             self.yt_tasks[gid]['error'] = '未抓取到视频分片（内容可能已下架或需登录）'
             return
 
-        ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        ua = CHROME_UA
         ck = "; ".join("%s=%s" % (c['name'], c['value']) for c in cookies if 'qiyi' in c.get('domain', ''))
         seg_dir = os.path.join(self.save_path, f".{gid}_segs")
         os.makedirs(seg_dir, exist_ok=True)
         total = 0; ok = 0
         for i, s in enumerate(segs):
-            if gid not in self.yt_tasks or self.yt_tasks[gid].get('state') == 'removed':
+            if gid not in self.yt_tasks or self.yt_tasks[gid].get('state') in ('removed', 'paused'):
                 self._cleanup_seg_dir(seg_dir)
                 return
             path = os.path.join(seg_dir, f"{i:04d}.ts")
             try:
-                r = subprocess.run(
-                    ['curl', '-sL', '-A', ua, '-e', 'https://www.iqiyi.com/',
-                     '-H', 'Cookie: ' + ck[:400], '-o', path, '-w', '%{http_code}',
-                     '--max-time', '30', s],
-                    capture_output=True, text=True, timeout=45)
-                sz = os.path.getsize(path) if os.path.exists(path) else 0
+                seg_ok, sz = _download_segment(s, path, ua, 'https://www.iqiyi.com/', ck, timeout=30)
             except Exception:
-                sz = 0; r = None
-            if r and r.stdout == '200' and sz > 1000:
+                seg_ok, sz = False, 0
+            if seg_ok:
                 ok += 1; total += sz
             else:
-                log.warning("[iQiyi dl] seg%d failed: HTTP=%s size=%s" % (i, getattr(r, 'stdout', '?'), sz))
+                log.warning("[iQiyi dl] seg%d failed: size=%s" % (i, sz))
             self.yt_tasks[gid]['size'] = total
             self.yt_tasks[gid]['progress'] = round(100 * (i + 1) / len(segs), 1)
             self.yt_tasks[gid]['download_rate'] = int(total / max(time.time() - info.get('added_at', time.time()), 1))
@@ -4206,7 +4319,7 @@ class Engine:
                     f.write("file '%s'\n" % p)
         try:
             r = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                [_FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
                  '-f', 'concat', '-safe', '0', '-i', concat_list,
                  '-c', 'copy', '-bsf:a', 'aac_adtstoasc', output_path],
                 capture_output=True, text=True, timeout=300)
@@ -4289,16 +4402,16 @@ class Engine:
                 target_idx = idx  # 取最后一个非 DRM（通常最高清）
         m3u8_url = uniq[target_idx] if target_idx < len(uniq) else uniq[0]
 
-        ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        ua = CHROME_UA
         ck = "; ".join("%s=%s" % (c['name'], c['value']) for c in cookies if 'qq.com' in c.get('domain', ''))
 
         # 取 m3u8 播放列表
         try:
-            r = subprocess.run(
-                ['curl', '-sL', '-A', ua, '-e', 'https://v.qq.com/',
-                 '-H', 'Cookie: ' + ck[:400], m3u8_url],
-                capture_output=True, text=True, timeout=20)
-            plist = r.stdout
+            resp = requests.get(m3u8_url, headers={
+                'User-Agent': ua, 'Referer': 'https://v.qq.com/',
+                'Cookie': ck[:400],
+            }, timeout=20)
+            plist = resp.text
         except Exception as e:
             self.yt_tasks[gid]['state'] = 'error'
             self.yt_tasks[gid]['error'] = '获取播放列表失败: ' + str(e)[:100]
@@ -4316,20 +4429,15 @@ class Engine:
         os.makedirs(seg_dir, exist_ok=True)
         total = 0; ok = 0
         for i, s in enumerate(segs):
-            if gid not in self.yt_tasks or self.yt_tasks[gid].get('state') == 'removed':
+            if gid not in self.yt_tasks or self.yt_tasks[gid].get('state') in ('removed', 'paused'):
                 self._cleanup_seg_dir(seg_dir)
                 return
             path = os.path.join(seg_dir, f"{i:04d}.ts")
             try:
-                r = subprocess.run(
-                    ['curl', '-sL', '-A', ua, '-e', 'https://v.qq.com/',
-                     '-H', 'Cookie: ' + ck[:400], '-o', path, '-w', '%{http_code}',
-                     '--max-time', '30', s],
-                    capture_output=True, text=True, timeout=45)
-                sz = os.path.getsize(path) if os.path.exists(path) else 0
+                seg_ok, sz = _download_segment(s, path, ua, 'https://v.qq.com/', ck, timeout=30)
             except Exception:
-                sz = 0
-            if r and r.stdout == '200' and sz > 1000:
+                seg_ok, sz = False, 0
+            if seg_ok:
                 ok += 1; total += sz
             self.yt_tasks[gid]['size'] = total
             self.yt_tasks[gid]['progress'] = round(100 * (i + 1) / len(segs), 1)
@@ -4352,7 +4460,7 @@ class Engine:
                     f.write("file '%s'\n" % p)
         try:
             r = subprocess.run(
-                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                [_FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
                  '-f', 'concat', '-safe', '0', '-i', concat_list,
                  '-c', 'copy', '-bsf:a', 'aac_adtstoasc', output_path],
                 capture_output=True, text=True, timeout=300)
@@ -4437,6 +4545,39 @@ class Engine:
             return True
         return False
 
+    def pause_yt_download(self, gid):
+        """Pause a yt-dlp download by setting a flag checked in the progress hook."""
+        if gid in self.yt_tasks:
+            info = self.yt_tasks[gid]
+            if info.get('state') not in ('downloading', 'fetching'):
+                return False
+            info['_pause_requested'] = True
+            info['state'] = 'paused'
+            return True
+        return False
+
+    def resume_yt_download(self, gid):
+        """Resume a paused yt-dlp download by restarting the download thread.
+        yt-dlp will resume from .part files (overwrites=False, continue=True)."""
+        if gid in self.yt_tasks:
+            info = self.yt_tasks[gid]
+            if info.get('state') != 'paused':
+                return False
+            url = info.get('url', '')
+            title = info.get('title', '视频下载')
+            format_id = info.get('format_id')
+            stream_data = info.get('_stream_data')
+            info['state'] = 'downloading'
+            info['_pause_requested'] = False
+            info['_resuming'] = True
+            info['download_rate'] = 0
+            t = threading.Thread(target=self._download_yt_thread,
+                                 args=(gid, url, format_id, title),
+                                 kwargs={'stream_data': stream_data}, daemon=True)
+            t.start()
+            return True
+        return False
+
     # ---- Bilibili DASH download (ffmpeg merge video+audio) ----
     def _extract_bili_info(self, url):
         """Parse Bilibili URL, extract video metadata and stream formats."""
@@ -4508,7 +4649,7 @@ class Engine:
             # Merge: download video → tmp, download audio → tmp, concat with ffmpeg
             # Use ffmpeg to download both streams simultaneously via two inputs + merge
             cmd = [
-                'ffmpeg', '-y',
+                _FFMPEG, '-y',
                 *headers_args,
                 '-i', v_url,
                 *headers_args,
@@ -4521,7 +4662,7 @@ class Engine:
         elif v_url:
             # Video only (no audio stream available)
             cmd = [
-                'ffmpeg', '-y',
+                _FFMPEG, '-y',
                 *headers_args,
                 '-i', v_url,
                 '-c', 'copy',
@@ -4534,7 +4675,7 @@ class Engine:
             output_path = output_path.replace('.mp4', '.m4a')
             self.bili_tasks[gid]['output'] = output_path
             cmd = [
-                'ffmpeg', '-y',
+                _FFMPEG, '-y',
                 *headers_args,
                 '-i', a_url,
                 '-c:a', 'copy',
@@ -4699,6 +4840,13 @@ class Engine:
             video_backup_urls = selected_video.get('backupUrl', []) if selected_video else []
             audio_url = selected_audio.get('baseUrl', '') if selected_audio else ''
             audio_backup_urls = selected_audio.get('backupUrl', []) if selected_audio else []
+            # Store params for pause/resume support
+            self.bili_tasks[gid].update({
+                '_video_url': video_url,
+                '_audio_url': audio_url,
+                '_video_backup_urls': video_backup_urls,
+                '_audio_backup_urls': audio_backup_urls,
+            })
             t = threading.Thread(target=self._download_bili_thread,
                                  args=(gid, video_url, audio_url, title,
                                        video_backup_urls, audio_backup_urls),
@@ -4735,6 +4883,73 @@ class Engine:
                     except Exception:
                         pass
             del self.bili_tasks[gid]
+            return True
+        return False
+
+    def pause_bili_download(self, gid):
+        """Pause a Bilibili download. DASH: kill ffmpeg. Legacy: aria2.pause."""
+        if gid in self.bili_tasks:
+            info = self.bili_tasks[gid]
+            if info.get('state') not in ('downloading', 'fetching'):
+                return False
+            # Legacy bili downloads use aria2
+            aria2_gid = info.get('_aria2_gid')
+            if aria2_gid:
+                try:
+                    self.aria.pause(aria2_gid)
+                except Exception:
+                    pass
+                info['state'] = 'paused'
+                return True
+            # DASH bili downloads use ffmpeg
+            proc = info.get('proc')
+            if proc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            info['state'] = 'paused'
+            info['proc'] = None
+            info['download_rate'] = 0
+            return True
+        return False
+
+    def resume_bili_download(self, gid):
+        """Resume a paused Bilibili download. Legacy: aria2.unpause. DASH: restart ffmpeg."""
+        if gid in self.bili_tasks:
+            info = self.bili_tasks[gid]
+            if info.get('state') != 'paused':
+                return False
+            # Legacy bili downloads use aria2
+            aria2_gid = info.get('_aria2_gid')
+            if aria2_gid:
+                try:
+                    self.aria.resume(aria2_gid)
+                    info['state'] = 'downloading'
+                    return True
+                except Exception:
+                    return False
+            # DASH bili downloads use ffmpeg - restart from scratch
+            video_url = info.get('_video_url', '')
+            audio_url = info.get('_audio_url', '')
+            title = info.get('title', 'B站视频')
+            video_backup_urls = info.get('_video_backup_urls')
+            audio_backup_urls = info.get('_audio_backup_urls')
+            # Clean up partial output before restart
+            output = info.get('output', '')
+            if output and os.path.exists(output):
+                try:
+                    os.remove(output)
+                except Exception:
+                    pass
+            info['state'] = 'downloading'
+            info['progress'] = 0
+            info['download_rate'] = 0
+            t = threading.Thread(target=self._download_bili_thread,
+                                 args=(gid, video_url, audio_url, title,
+                                       video_backup_urls, audio_backup_urls),
+                                 daemon=True)
+            t.start()
             return True
         return False
 
@@ -4875,9 +5090,9 @@ def api_pause():
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.pause_m3u8_download(gid))
     if gid and gid.startswith("yt_"):
-        return jsonify(ok=False, error="yt-dlp 下载不支持暂停")
+        return jsonify(ok=engine.pause_yt_download(gid))
     if gid and gid.startswith("bili_"):
-        return jsonify(ok=False, error="B站视频下载不支持暂停")
+        return jsonify(ok=engine.pause_bili_download(gid))
     if gid and gid.startswith("cf_"):
         return jsonify(ok=False, error="浏览器下载不支持暂停")
     return jsonify(ok=engine.pause(data.get("gid")))
@@ -4889,6 +5104,10 @@ def api_resume():
     gid = data.get("gid")
     if gid and gid.startswith("m3u8_"):
         return jsonify(ok=engine.resume_m3u8_download(gid))
+    if gid and gid.startswith("yt_"):
+        return jsonify(ok=engine.resume_yt_download(gid))
+    if gid and gid.startswith("bili_"):
+        return jsonify(ok=engine.resume_bili_download(gid))
     if gid and gid.startswith("cf_"):
         return jsonify(ok=False, error="浏览器下载不支持暂停/恢复")
     return jsonify(ok=engine.resume(data.get("gid")))
@@ -5210,7 +5429,7 @@ def api_poster_proxy():
         else:
             referer, no_proxy = 'https://' + host + '/', None
         r = requests.get(url, headers={
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'User-Agent': HTTP_UA,
             'Referer': referer,
         }, timeout=(5, 8), proxies=no_proxy)
         return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
@@ -5244,14 +5463,16 @@ def api_choose_dir():
 
 @app.route("/api/clipboard")
 def api_clipboard():
-    """读取系统剪贴板（macOS pbpaste / Windows powershell）。"""
-    import platform
+    """读取系统剪贴板（macOS pbpaste / Windows powershell / Linux xclip）。"""
     try:
-        if platform.system() == "Windows":
+        if IS_WINDOWS:
             r = subprocess.run(["powershell", "-Command", "Get-Clipboard"],
                              capture_output=True, text=True, timeout=3)
-        else:
+        elif IS_MACOS:
             r = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=3)
+        else:
+            r = subprocess.run(["xclip", "-selection", "clipboard", "-o"],
+                             capture_output=True, text=True, timeout=3)
         return jsonify(text=r.stdout)
     except Exception as e:
         return jsonify(text="", error=str(e))
@@ -5259,11 +5480,17 @@ def api_clipboard():
 
 @app.route("/api/open_folder", methods=["POST"])
 def api_open_folder():
-    """在 Finder 中打开下载目录。"""
+    """在文件管理器中打开下载目录。"""
     data = request.get_json(force=True)
     path = data.get("path", engine.save_path)
     try:
-        subprocess.Popen(["open", "-R", path])
+        if IS_WINDOWS:
+            # explorer /select,"path" reveals the file in Explorer
+            subprocess.Popen(['explorer', '/select,', path])
+        elif IS_MACOS:
+            subprocess.Popen(["open", "-R", path])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path) or path])
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e))
@@ -5277,7 +5504,12 @@ def api_play_file():
     if not path or not os.path.exists(path):
         return jsonify(ok=False, error="文件不存在")
     try:
-        subprocess.Popen(["open", path])
+        if IS_WINDOWS:
+            os.startfile(path)
+        elif IS_MACOS:
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e))

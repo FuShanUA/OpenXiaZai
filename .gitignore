@@ -14,3 +14,4 @@ dist/
 *.exe
 *.pkg
 *.log
+m3u8_tasks.json

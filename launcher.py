@@ -5,6 +5,7 @@
 import os
 import sys
 import time
+import tempfile
 import threading
 
 # 确保能 import 同目录的 app 模块(打包后同样生效)
@@ -17,10 +18,14 @@ from app import app, engine, DEFAULT_SAVE
 import faulthandler, traceback as _tb
 faulthandler.enable()
 _orig_excepthook = sys.excepthook
+_CRASH_LOG = os.path.join(tempfile.gettempdir(), "openxiazai_crash.log")
 def _excepthook(t, v, tb):
     msg = "".join(_tb.format_exception(t, v, tb))
-    with open("/tmp/launcher_crash.log", "a") as f:
-        f.write(msg + "\n")
+    try:
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
     _orig_excepthook(t, v, tb)
 sys.excepthook = _excepthook
 
@@ -65,7 +70,10 @@ def main():
         engine.proc.terminate()
         engine.proc.wait(timeout=5)
     except Exception:
-        pass
+        try:
+            engine.proc.kill()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

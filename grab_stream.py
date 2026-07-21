@@ -6,6 +6,13 @@ platform: iqiyi | tencent
 输出: 一行 JSON 到 stdout，随后 os._exit 强制退出（避免 browser.close 卡住）。"""
 import sys, json, os
 
+_IS_WIN = sys.platform == "win32"
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+       ) if _IS_WIN else (
+       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
 
 def _launch():
     from playwright.sync_api import sync_playwright
@@ -14,9 +21,7 @@ def _launch():
         "--disable-blink-features=AutomationControlled", "--no-first-run",
         "--no-default-browser-check", "--disable-dev-shm-usage",
         "--no-sandbox", "--no-proxy-server"])
-    ctx = b.new_context(user_agent=
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    ctx = b.new_context(user_agent=_UA)
     return p, b, ctx
 
 

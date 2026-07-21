@@ -35,11 +35,28 @@ def find_binary(name):
     p = shutil.which(name)
     if p:
         return p
-    # macOS Homebrew 常见路径
+    # macOS Homebrew paths
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin"]:
         cand = os.path.join(prefix, name)
         if os.path.exists(cand):
             return cand
+    # Windows: scoop, chocolatey, Program Files
+    if sys.platform == "win32":
+        for env_var in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"]:
+            base = os.environ.get(env_var, "")
+            if not base:
+                continue
+            for sub in [name, name + "\\\\" + name]:
+                cand = os.path.join(base, sub, name + ".exe")
+                if os.path.isfile(cand):
+                    return cand
+            for pkg_dir in ["scoop\\\\apps", "chocolatey\\\\bin"]:
+                cand = os.path.join(base, pkg_dir, name, "current", name + ".exe")
+                if os.path.isfile(cand):
+                    return cand
+                cand = os.path.join(base, pkg_dir, name + ".exe")
+                if os.path.isfile(cand):
+                    return cand
     return None
 
 
@@ -71,7 +88,7 @@ a = Analysis(
         ('{os.path.join(ROOT, "templates")}', 'templates'),
         ('{os.path.join(ROOT, "static")}', 'static'),
     ],
-    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe'],
+    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
@@ -140,12 +157,75 @@ app = BUNDLE(
     os.remove(spec_path)
 
 
+def _download_aria2c():
+    """Download aria2c.exe into the project root if not found."""
+    import zipfile
+    url = "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip"
+    target = os.path.join(ROOT, "aria2c.exe")
+    if os.path.isfile(target):
+        return target
+    print("下载 aria2c.exe ...")
+    import urllib.request
+    zip_path = os.path.join(ROOT, "aria2.zip")
+    urllib.request.urlretrieve(url, zip_path)
+    with zipfile.ZipFile(zip_path) as z:
+        for name in z.namelist():
+            if name.endswith("aria2c.exe"):
+                with z.open(name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                break
+    os.remove(zip_path)
+    if os.path.isfile(target):
+        print(f"  aria2c.exe -> {target}")
+        return target
+    return None
+
+def _download_ffmpeg():
+    """Download ffmpeg.exe into the project root if not found."""
+    import zipfile
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    target = os.path.join(ROOT, "ffmpeg.exe")
+    if os.path.isfile(target):
+        return target
+    print("下载 ffmpeg.exe ...")
+    import urllib.request
+    zip_path = os.path.join(ROOT, "ffmpeg.zip")
+    urllib.request.urlretrieve(url, zip_path)
+    with zipfile.ZipFile(zip_path) as z:
+        for name in z.namelist():
+            if name.endswith("ffmpeg.exe") and "bin" in name:
+                with z.open(name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                break
+    os.remove(zip_path)
+    if os.path.isfile(target):
+        print(f"  ffmpeg.exe -> {target}")
+        return target
+    return None
+
 def build_win():
     print("=" * 50)
     print("  构建 Windows .exe")
     print("=" * 50)
 
+    aria2 = find_binary("aria2c.exe") or find_binary("aria2c")
+    ffmpeg = find_binary("ffmpeg.exe") or find_binary("ffmpeg")
+    if not aria2 and sys.platform == "win32":
+        aria2 = _download_aria2c()
+    if not ffmpeg and sys.platform == "win32":
+        ffmpeg = _download_ffmpeg()
+    if not aria2:
+        print("错误: 未找到 aria2c.exe")
+        print("请下载 aria2 并将 aria2c.exe 放入 PATH 或项目目录")
+        sys.exit(1)
+    if not ffmpeg:
+        print("警告: 未找到 ffmpeg.exe，m3u8 下载将不可用")
+
     clean()
+
+    binaries = [f"('{aria2}', '.')"]
+    if ffmpeg:
+        binaries.append(f"('{ffmpeg}', '.')")
 
     # 生成 spec（Windows 不需要 BUNDLE，直接出 exe 即可）
     spec = f"""# -*- mode: python ; coding: utf-8 -*-
@@ -154,12 +234,12 @@ import os, sys
 a = Analysis(
     ['{os.path.join(ROOT, "launcher.py")}'],
     pathex=['{ROOT}'],
-    binaries=[],
+    binaries=[{", ".join(binaries)}],
     datas=[
         ('{os.path.join(ROOT, "templates")}', 'templates'),
         ('{os.path.join(ROOT, "static")}', 'static'),
     ],
-    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe'],
+    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
@@ -200,8 +280,8 @@ exe = EXE(
         sys.exit(1)
 
     size_mb = os.path.getsize(exe_path) / 1024 / 1024
-    print(f"✅ 构建完成: {exe_path} ({size_mb:.1f} MB)")
-    print("提示: Windows 用户需自行安装 aria2c 和 ffmpeg 并加入 PATH")
+    print(f"构建完成: {exe_path} ({size_mb:.1f} MB)")
+    print("aria2c 和 ffmpeg 已捆绑在 exe 中，无需额外安装")
     os.remove(spec_path)
 
 

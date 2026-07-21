@@ -16,16 +16,31 @@
 
 ### 依赖
 
-```bash
-# macOS
-brew install aria2
-brew install amule   # 可选：ed2k 电驴下载支持
+#### macOS
 
-# Python 依赖
+```bash
+brew install aria2 ffmpeg
+pip install flask pywebview requests yt-dlp playwright
+```
+
+#### Windows
+
+```bash
+# 安装 aria2 和 ffmpeg（任选一种方式）
+# 方式1: scoop
+scoop install aria2 ffmpeg
+# 方式2: chocolatey
+choco install aria2 ffmpeg
+# 方式3: 手动下载放入 PATH 或项目目录
+#   aria2c.exe: https://github.com/aria2/aria2/releases
+#   ffmpeg.exe: https://ffmpeg.org/download.html
+
 pip install flask pywebview requests yt-dlp playwright
 ```
 
 ### 克隆
+
+#### macOS / Linux
 
 ```bash
 git clone https://github.com/FuShanUA/OpenXiaZai.git
@@ -33,8 +48,17 @@ cd OpenXiaZai
 python -m venv venv
 source venv/bin/activate
 pip install flask pywebview requests yt-dlp playwright
+python -m playwright install chromium
+```
 
-# Playwright 浏览器（爱奇艺/腾讯视频/抖音抓流需要）
+#### Windows
+
+```cmd
+git clone https://github.com/FuShanUA/OpenXiaZai.git
+cd OpenXiaZai
+python -m venv venv
+venv\Scripts\activate
+pip install flask pywebview requests yt-dlp playwright
 python -m playwright install chromium
 ```
 
@@ -42,27 +66,51 @@ python -m playwright install chromium
 
 ### 桌面应用
 
-双击 `OpenXiaZai.app`（需先创建桌面快捷方式）：
+macOS:
 
 ```bash
-# 创建桌面快捷方式（macOS）
-mkdir -p ~/Desktop/OpenXiaZai.app/Contents/{MacOS,Resources}
-cp app_icon.icns ~/Desktop/OpenXiaZai.app/Contents/Resources/
-# 编辑 ~/Desktop/OpenXiaZai.app/Contents/MacOS/OpenXiaZai 指向项目目录
+# 使用启动脚本
+./start.sh
+```
+
+Windows:
+
+```cmd
+:: 双击 start.bat 或在命令行运行
+start.bat
 ```
 
 ### 命令行
+
+macOS / Linux:
 
 ```bash
 cd OpenXiaZai
 venv/bin/python launcher.py
 ```
 
+Windows:
+
+```cmd
+cd OpenXiaZai
+venv\Scripts\python.exe launcher.py
+```
+
 或仅启动 Web 服务（在浏览器中使用）：
 
 ```bash
-venv/bin/python app.py
+python app.py
 # 打开 http://127.0.0.1:5566
+```
+
+### 打包
+
+```bash
+# macOS: 生成 .app + .dmg
+python build.py mac
+
+# Windows: 生成 .exe（自动捆绑 aria2c.exe 和 ffmpeg.exe）
+python build.py win
 ```
 
 ## 技术栈
@@ -73,7 +121,7 @@ venv/bin/python app.py
 | [aria2](https://github.com/aria2/aria2) | 下载引擎，支持多协议、多线程、DHT |
 | [aMule](https://github.com/amule-project/amule) | ed2k/eDonkey 下载引擎（可选） |
 | [Flask](https://flask.palletsprojects.com/) | Web 后端，提供 REST API |
-| [pywebview](https://pywebview.flowrl.com/) | 原生桌面窗口，WKWebView 承载前端 |
+| [pywebview](https://pywebview.flowrl.com/) | 原生桌面窗口（macOS WKWebView / Windows WebView2） |
 
 ## 项目结构
 
