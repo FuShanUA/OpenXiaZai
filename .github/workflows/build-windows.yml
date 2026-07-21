@@ -19,8 +19,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Download aria2c.exe
         shell: pwsh
@@ -41,10 +40,10 @@ jobs:
           Copy-Item $exe.FullName .
           Remove-Item -Recurse ffmpeg.zip, ffmpeg_tmp
 
-     - name: Build EXE
+      - name: Build EXE
         env:
           PYTHONUTF8: '1'
-       run: python build.py win
+        run: python build.py win
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
