@@ -259,6 +259,9 @@ def classify(url):
         # 腾讯视频 — yt-dlp handler (v.qq.com)
         if re.match(r'https?://(www\.|m\.)?(v\.qq\.com|film\.qq\.com)/', u):
             return "tencent"
+        # CNBC — 专用提取器（JS 渲染播放器，需从 /id/{video_id} 拿 MP4 直链）
+        if re.match(r'https?://(www\.)?cnbc\.com/', u):
+            return "cnbc"
         if "pan.quark.cn" in u or "quark.cn" in u:
             return "quark"
         if any(h in u for h in ("pan.baidu.com", "115.com", "aliyundrive", "alipan.com")):
@@ -301,6 +304,7 @@ def _extract_title(html):
 
 def _check_direct_video_url(url):
     """检查 URL 本身是否直接指向视频文件。"""
+    url = _sanitize_video_url(url)
     lower = url.lower()
     # m3u8/HLS 播放列表
     if lower.endswith('.m3u8') or '.m3u8?' in lower:
@@ -312,6 +316,13 @@ def _check_direct_video_url(url):
             name = url.split('/')[-1].split('?')[0]
             return {"ok": True, "title": name, "m3u8_url": url, "poster": "", "magnet": "", "type": "direct"}
     return None
+
+
+def _sanitize_video_url(url):
+    """Clean extracted video URLs: strip trailing backslashes (JSON escape artifacts) and whitespace."""
+    if not url:
+        return url
+    return url.rstrip('\\').rstrip()
 
 
 def _detect_login_required(html):
@@ -1544,7 +1555,7 @@ def _extract_from_js(html):
     for pattern, vtype in patterns:
         match = re.search(pattern, html, re.IGNORECASE)
         if match:
-            return {"video_url": match.group(1), "title": _extract_title(html), "type": vtype}
+            return {"video_url": _sanitize_video_url(match.group(1)), "title": _extract_title(html), "type": vtype}
     return None
 
 
@@ -1615,6 +1626,156 @@ def _extract_from_meta(html):
     return None
 
 
+def _extract_vimeo_from_html(html, url):
+    """从页面 HTML/JS 中提取 Vimeo 播放器 URL 并用 yt-dlp 解析。
+
+    很多网站（如 Cloudwars）不使用 <iframe> 嵌入 Vimeo，而是通过 JS 构造
+    `new Vimeo.Player(el, {url: "https://player.vimeo.com/video/XXX?h=YYY"})`。
+    本函数从 HTML 中正则提取这类 URL，然后交给 yt-dlp 的 Vimeo extractor 解析。
+    """
+    # 匹配 player.vimeo.com/video/数字 格式的 URL（带可选 hash 参数）
+    vimeo_matches = re.findall(
+        r"(https?://player\.vimeo\.com/video/\d+(?:\?[^\"'\s]+)?)",
+        html, re.IGNORECASE
+    )
+    if not vimeo_matches:
+        return None
+
+    # 去重
+    seen = set()
+    vimeo_urls = []
+    for vu in vimeo_matches:
+        vu = vu.replace('\\u0026', '&').replace('\\/', '/')
+        if vu not in seen:
+            seen.add(vu)
+            vimeo_urls.append(vu)
+
+    for vimeo_url in vimeo_urls:
+        result = _extract_with_ytdlp(vimeo_url)
+        if result and result.get('ok'):
+            # 用原始页面的标题覆盖（更准确）
+            page_title = _extract_title(html)
+            if page_title:
+                result['title'] = page_title
+            return result
+
+    return None
+
+def _cnbc_fetch(url, headers):
+    """CNBC 的 SSL 对 Python requests 不友好，用 curl 作为 fallback。"""
+    import subprocess
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        r.encoding = 'utf-8'
+        return r.text
+    except Exception:
+        pass
+    # curl fallback
+    try:
+        ua = headers.get('User-Agent', 'Mozilla/5.0')
+        result = subprocess.run(
+            ['curl', '-sL', '-A', ua, '--connect-timeout', '15', '--max-time', '20', url],
+            capture_output=True, text=True, timeout=25
+        )
+        return result.stdout or ''
+    except Exception:
+        return ''
+
+
+def _extract_cnbc(url, headers):
+    """CNBC 视频提取：从页面 __CNBC_META_DATA 拿 video_id，
+    再请求 /id/{video_id} 页面提取 Akamai CDN 上的 MP4 直链。
+    CNBC 播放器是纯 JS 渲染，HTML 里没有 <video> 标签，
+    但 /id/{id} 页面的 SMIL/metadata 中包含 MP4 直链。"""
+    try:
+        html = _cnbc_fetch(url, headers)
+        if not html:
+            return None
+
+        # 从 __CNBC_META_DATA JSON 中提取 video_id
+        # CNBC 页面中 __CNBC_META_DATA 的 id 字段是视频 ID（如 108354797）
+        # 但页面中有很多其他 id 字段，需要精确匹配 __CNBC_META_DATA 中的
+        m = re.search(r'__CNBC_META_DATA.*?\\"id\\":(\d{6,})', html)
+        if not m:
+            # Fallback: try mpscall which also has the video id
+            m = re.search(r'mpscall.*?\\"id\\":(\d{6,})', html)
+        if not m:
+            # Another fallback: look for "nid" field which equals the video id
+            m = re.search(r'\\"nid\\":(\d{6,})', html)
+        if not m:
+            return None
+        video_id = m.group(1)
+
+        # 从 og:title 提取标题
+        title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html, re.IGNORECASE)
+        title = title_match.group(1) if title_match else ''
+        # HTML 实体解码
+        title = title.replace('&#x27;', "'").replace('&amp;', '&').replace('&#x2F;', '/')
+
+        # 从 og:image 提取封面
+        poster_match = re.search(r'<meta\s+property="og:image"[^>]*content="([^"]+)"', html, re.IGNORECASE)
+        poster = poster_match.group(1).replace('&amp;', '&') if poster_match else ''
+
+        # 请求 /id/{video_id} 页面，提取 MP4 直链（同样用 curl）
+        id_url = f'https://www.cnbc.com/id/{video_id}'
+        id_html = _cnbc_fetch(id_url, headers)
+        if not id_html:
+            return None
+
+        # 提取所有 MP4 URL，优先选高清版本
+        mp4_urls = re.findall(r'https?://[^"\'<>\s]+\.mp4[^"\'<>\s]*', id_html)
+        if not mp4_urls:
+            return None
+
+        # 去重
+        seen = set()
+        unique_urls = []
+        for u in mp4_urls:
+            # 清理 URL 中的 HTML 实体
+            u = u.replace('&amp;', '&')
+            if u not in seen:
+                seen.add(u)
+                unique_urls.append(u)
+
+        # /id/ 页面通常只给一个 _L.mp4（低清），但我们可以从 SMIL 清单
+        # 发现所有码率版本，然后构造高码率 MP4 URL
+        # SMIL 路径: {base_dir}/prod_{vcpsId}_MBR_{filename}.smil
+        best_url = unique_urls[0]
+        try:
+            # 从 MP4 URL 提取 base_dir 和 filename
+            # URL 格式: https://.../{vcpsId}/{guid}/{filename}_hd_L.mp4
+            from urllib.parse import urlparse
+            parsed = urlparse(best_url)
+            path_parts = parsed.path.split('/')
+            if len(path_parts) >= 4:
+                # base_dir = /{vcpsId}/{guid}/
+                base_dir = '/'.join(path_parts[:3])
+                filename = path_parts[3]  # e.g. 1787776608-48002802266-hd_L.mp4
+                # 去掉 _L.mp4 后缀，得到 base name
+                base_name = re.sub(r'_L\.mp4$', '', filename)
+                if base_name != filename:  # 确实去掉了 _L
+                    # 尝试获取 SMIL 清单
+                    smil_url = f'{parsed.scheme}://{parsed.netloc}{base_dir}/prod_{path_parts[1]}_MBR_{base_name}.smil'
+                    smil_html = _cnbc_fetch(smil_url, headers)
+                    if smil_html:
+                        # 从 SMIL 提取所有码率版本，选最高的
+                        bitrates = re.findall(r'name="([^"]+MBR_(\d+)\.mp4)"', smil_html)
+                        if bitrates:
+                            # 按码率排序，选最高
+                            bitrates.sort(key=lambda x: int(x[1]), reverse=True)
+                            best_video = bitrates[0][0]
+                            best_url = f'{parsed.scheme}://{parsed.netloc}{base_dir}/{best_video}'
+        except Exception:
+            pass
+
+        return {
+            "ok": True, "title": title, "poster": poster,
+            "m3u8_url": best_url, "magnet": "", "type": "direct",
+        }
+    except Exception:
+        return None
+
+
 def extract_video(url):
     """通用视频提取器：从任意 URL 中尝试提取可下载的视频地址。
 
@@ -1637,6 +1798,12 @@ def extract_video(url):
         if direct:
             return direct
 
+        # CNBC 专用：从 __CNBC_META_DATA 提取 video_id，再从 /id/{id} 拿 MP4 直链
+        if 'cnbc.com' in url.lower():
+            cnbc_result = _extract_cnbc(url, headers)
+            if cnbc_result and cnbc_result.get('ok'):
+                return cnbc_result
+
         # 获取页面
         r = requests.get(url, headers=headers, timeout=15)
         r.encoding = 'utf-8'
@@ -1653,6 +1820,7 @@ def extract_video(url):
         result = _extract_from_video_tag(html, url)
         if result:
             video_url = result["video_url"]
+            video_url = _sanitize_video_url(video_url)
             if not video_url.startswith('http'):
                 video_url = urljoin(url, video_url)
             vtype = "m3u8" if '.m3u8' in video_url else "direct"
@@ -1663,6 +1831,7 @@ def extract_video(url):
         result = _extract_from_js(html)
         if result:
             video_url = result["video_url"]
+            video_url = _sanitize_video_url(video_url)
             if not video_url.startswith('http'):
                 video_url = urljoin(url, video_url)
             vtype = result.get("type", "m3u8" if '.m3u8' in video_url else "direct")
@@ -1674,6 +1843,7 @@ def extract_video(url):
         result = _extract_from_iframe(html, url, headers)
         if result:
             video_url = result["video_url"]
+            video_url = _sanitize_video_url(video_url)
             if not video_url.startswith('http'):
                 video_url = urljoin(url, video_url)
             vtype = result.get("type", "m3u8" if '.m3u8' in video_url else "direct")
@@ -1685,11 +1855,18 @@ def extract_video(url):
         result = _extract_from_meta(html)
         if result:
             video_url = result["video_url"]
+            video_url = _sanitize_video_url(video_url)
             if not video_url.startswith('http'):
                 video_url = urljoin(url, video_url)
             vtype = "m3u8" if '.m3u8' in video_url else "direct"
             return {"ok": True, "title": result.get("title", ""), "poster": poster,
                     "m3u8_url": video_url, "magnet": magnet, "type": vtype}
+
+        # 策略 4.5: Vimeo — 从 JS 构造的 Vimeo.Player 中提取视频
+        vimeo_result = _extract_vimeo_from_html(html, url)
+        if vimeo_result and vimeo_result.get("ok"):
+            vimeo_result["poster"] = poster or vimeo_result.get("poster", "")
+            return vimeo_result
 
         # 策略 5: 页面中有磁力链接（无视频时仍可下载种子）
         if magnet:
@@ -2612,6 +2789,26 @@ class Engine:
         # Bilibili links: use DASH API to extract info for preview
         if t == "bilibili":
             return self._extract_bili_info(url)
+        # CNBC: 专用提取器拿 MP4 直链后交给 aria2 下载
+        if t == "cnbc":
+            result = extract_video(url)
+            if not result or not result.get("ok"):
+                return {"ok": False, "error": result.get("error", "未解析出可下载内容") if result else "未解析出可下载内容", "type": "cnbc"}
+            video_url = result.get("m3u8_url", "")
+            if not video_url:
+                return {"ok": False, "error": "未解析出可下载内容", "type": "cnbc"}
+            title = result.get("title", "") or "cnbc_video"
+            # CNBC 的 CDN 在 akamaized.net 上，需要带 referer
+            opts = {"dir": self.save_path,
+                    "max-connection-per-server": str(self.connections),
+                    "split": str(self.connections),
+                    "header": [f"User-Agent: {HTTP_UA}", "Referer: https://www.cnbc.com/"],
+                    "out": title + ".mp4"}
+            gid = self.aria.add(video_url, opts)
+            self.tasks[gid] = {"type": "http", "url": video_url, "submitted": True,
+                               "picked": False, "pending": False,
+                               "added_at": time.time()}
+            return {"ok": True, "gid": gid, "type": "http", "name": title + ".mp4"}
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
@@ -3570,10 +3767,31 @@ class Engine:
     # ---- m3u8/HLS 流媒体下载 (ffmpeg) ----
     def _get_m3u8_duration(self, m3u8_url):
         """通过解析 m3u8 播放列表中的 EXTINF 标签来计算总时长（秒）。
-        支持主播放列表（master playlist）递归解析。"""
+        支持主播放列表（master playlist）递归解析。
+        仅对真正的 m3u8 链接生效；直链视频文件直接返回 None，避免把整部影片下载进内存。"""
+        # 非 m3u8 直链（mp4/mkv 等）：EXTINF 解析不适用，直接返回 None。
+        # 否则 requests.get 会把整个媒体文件拉进内存（几百 MB→GB），把下载线程卡死。
+        if '.m3u8' not in m3u8_url.lower().split('#')[0]:
+            return None
         try:
-            r = requests.get(m3u8_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-            text = r.text
+            # stream + 限量读取：m3u8 播放列表是纯文本且很小，只读前 256KB；
+            # 即便链接被误判为 m3u8 也不会吞下海量数据。
+            r = requests.get(m3u8_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10, stream=True)
+            chunks = []
+            total = 0
+            try:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if not chunk:
+                        continue
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode('utf-8', errors='ignore')
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total >= 262144:
+                        break
+            finally:
+                r.close()
+            text = ''.join(chunks)
             # 检查是否为主播放列表（包含 EXT-X-STREAM-INF）
             if '#EXT-X-STREAM-INF' in text:
                 # 取第一个（通常最高码率）变体播放列表
@@ -3582,7 +3800,6 @@ class Engine:
                 best_url = None
                 for line in text.split('\n'):
                     if line.startswith('#EXT-X-STREAM-INF'):
-                        import re
                         bw_match = re.search(r'BANDWIDTH=(\d+)', line)
                         bw = int(bw_match.group(1)) if bw_match else 0
                         if bw > best_bandwidth:
@@ -3607,10 +3824,11 @@ class Engine:
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or "视频"
         output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
         is_resume = resume_from > 0
+        # 先捕获已有任务元数据（续传/恢复复用 added_at 等），之后再覆盖
+        old_info = self.m3u8_tasks.get(gid, {})
 
         if is_resume:
             # 续传：使用已有文件路径，下载剩余部分后拼接
-            old_info = self.m3u8_tasks.get(gid, {})
             existing_output = old_info.get('output', '')
             if existing_output and os.path.exists(existing_output) and os.path.getsize(existing_output) > 1024:
                 output_path = existing_output
@@ -3633,19 +3851,25 @@ class Engine:
                 counter += 1
             actual_output = output_path
 
-        duration = self._get_m3u8_duration(m3u8_url)
-
+        # 立即注册任务（state=downloading），让卡片马上出现、恢复也能立刻翻状态。
+        # 时长探测放在注册之后，避免慢/大源把任务藏起来。
         info = {
             'url': m3u8_url, 'title': title, 'output': output_path,
-            'state': 'downloading', 'progress': resume_from / duration * 100 if duration and resume_from else 0,
+            'state': 'downloading', 'progress': 0,
             'size': 0, 'download_rate': 0,
-            'current_time': resume_from, 'duration': duration,
+            'current_time': resume_from, 'duration': None,
             'proc': None, '_last_size': 0, '_last_time': time.time(), '_smooth_rate': 0,
             'resume_from': resume_from, 'part1': output_path if is_resume else None,
             'part2': actual_output if is_resume else None,
-            'added_at': (self.m3u8_tasks.get(gid, {}).get('added_at') if is_resume else None) or time.time(),
+            'added_at': old_info.get('added_at') or time.time(),
         }
         self.m3u8_tasks[gid] = info
+
+        # 探测时长（仅对真正的 m3u8；直链返回 None，且不会下载整部影片）
+        duration = self._get_m3u8_duration(m3u8_url)
+        info['duration'] = duration
+        if duration and resume_from:
+            info['progress'] = resume_from / duration * 100
 
         cmd = [
             _FFMPEG, '-y',
@@ -3733,6 +3957,7 @@ class Engine:
 
     def start_m3u8_download(self, m3u8_url, title, paused=False):
         """启动 m3u8 流媒体下载。paused=True 时仅创建任务不开始下载。"""
+        m3u8_url = _sanitize_video_url(m3u8_url)
         gid = f"m3u8_{self._m3u8_counter}"
         self._m3u8_counter += 1
         if paused:

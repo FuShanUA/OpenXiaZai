@@ -905,12 +905,19 @@ function showYtPreview(data){
   // Build format buttons
   const fmts=data.formats||[];
   const vaFormats=fmts.filter(f=>f.is_video_audio);
+  const voFormats=fmts.filter(f=>f.is_video_only);
   let fmtBtnsHtml='';
-  // Auto-select best format
+  // Auto-select best format: prefer combined (video+audio), then highest video-only
   let bestFmt=null;
   if(vaFormats.length)bestFmt=vaFormats[0];
+  else if(voFormats.length)bestFmt=voFormats.reduce((a,b)=>(b.height||0)>(a.height||0)?b:a);
   else if(fmts.length)bestFmt=fmts[0];
+  // Show combined (video+audio) formats first, then video-only formats
   vaFormats.forEach((f,i)=>{
+    const isBest=bestFmt&&f.format_id===bestFmt.format_id;
+    fmtBtnsHtml+='<button class="btn sm'+(isBest?' primary':'')+'" data-fid="'+f.format_id+'">'+esc(f.label)+(f.ext?' · '+f.ext:'')+'</button>';
+  });
+  voFormats.slice().sort((a,b)=>(b.height||0)-(a.height||0)).forEach((f,i)=>{
     const isBest=bestFmt&&f.format_id===bestFmt.format_id;
     fmtBtnsHtml+='<button class="btn sm'+(isBest?' primary':'')+'" data-fid="'+f.format_id+'">'+esc(f.label)+(f.ext?' · '+f.ext:'')+'</button>';
   });
