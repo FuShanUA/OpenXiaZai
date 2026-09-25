@@ -15,3 +15,4 @@ dist/
 *.pkg
 *.log
 m3u8_tasks.json
+yt_tasks.json

@@ -8,6 +8,8 @@ import subprocess
 import re
 import hashlib
 import threading
+import socket
+import ipaddress
 import requests
 from flask import Flask, request, jsonify, render_template, Response
 
@@ -103,10 +105,13 @@ for _venv_base in [
         for _sub in os.listdir(_venv_base):
             _sp = os.path.join(_venv_base, _sub, "site-packages") if _sub != "site-packages" else _venv_base
             if os.path.isdir(_sp) and _sp not in sys.path:
-                sys.path.insert(0, _sp)
+                # Append fallback environments. Inserting them would shadow the
+                # yt-dlp version installed in this app's active virtualenv.
+                sys.path.append(_sp)
 
 DEFAULT_SAVE = _downloads_dir()
 RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
+YT_TASKS_FILE = os.path.join(BASE_DIR, "yt_tasks.json")
 
 import logging
 LOG_FILE = os.path.join(BASE_DIR, "debug.log")
@@ -122,6 +127,117 @@ log = logging.getLogger("OpenXiaZai")
 # Suppress noisy HTTP request logs
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+# Local proxy/TUN setups can return placeholder or unrelated addresses for
+# Vimeo. Resolve Vimeo through DNS-over-HTTPS, and use DoH as a fallback when
+# the TUN placeholder range appears for other hosts.
+_ORIG_GETADDRINFO = getattr(socket, "_openxiazai_original_getaddrinfo", socket.getaddrinfo)
+socket._openxiazai_original_getaddrinfo = _ORIG_GETADDRINFO
+_TUN_FAKE_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+_DOH_HOST_SUFFIXES = ("vimeo.com", "vimeocdn.com")
+_DNS_CACHE = {}
+_DNS_LOCK = threading.Lock()
+
+
+def _doh_lookup(host, record_type):
+    """Resolve a host through Google DNS JSON API, with a short local cache."""
+    cache_key = (host, record_type)
+    with _DNS_LOCK:
+        cached = _DNS_CACHE.get(cache_key)
+        if cached and cached[0] > time.time():
+            return cached[1]
+
+    try:
+        response = requests.get(
+            "https://dns.google/resolve",
+            params={"name": host, "type": record_type},
+            headers={"Accept": "application/dns-json"},
+            timeout=(3, 7),
+        )
+        response.raise_for_status()
+        data = response.json()
+        answers = []
+        ttl = 300
+        for answer in data.get("Answer", []):
+            if answer.get("type") != (1 if record_type == "A" else 28):
+                continue
+            try:
+                ipaddress.ip_address(answer.get("data", ""))
+            except ValueError:
+                continue
+            answers.append(answer["data"])
+            answer_ttl = answer.get("TTL")
+            if isinstance(answer_ttl, int):
+                ttl = min(ttl, max(answer_ttl, 30))
+        if not answers:
+            return None
+        with _DNS_LOCK:
+            _DNS_CACHE[cache_key] = (time.time() + ttl, answers)
+        return answers
+    except Exception:
+        return None
+
+
+def _openxiazai_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if not host or host == "dns.google" or flags & socket.AI_NUMERICHOST:
+        return _ORIG_GETADDRINFO(host, port, family, type, proto, flags)
+
+    result = None
+    system_error = None
+    try:
+        result = _ORIG_GETADDRINFO(host, port, family, type, proto, flags)
+    except socket.gaierror as exc:
+        system_error = exc
+
+    forced_doh = host in _DOH_HOST_SUFFIXES or any(
+        host.endswith("." + suffix) for suffix in _DOH_HOST_SUFFIXES
+    )
+
+    try:
+        fake_only = bool(result) and all(
+            item[0] == socket.AF_INET
+            and ipaddress.ip_address(item[4][0]) in _TUN_FAKE_NETWORK
+            for item in result
+        )
+    except (ValueError, IndexError, TypeError):
+        fake_only = False
+    if not forced_doh and not fake_only:
+        return result
+
+    record_type = "AAAA" if family == socket.AF_INET6 else "A"
+    addresses = _doh_lookup(host, record_type)
+    if not addresses:
+        if system_error is not None:
+            raise system_error
+        return result
+
+    log.info(
+        "[dns] using DoH result for %s: %s (%s)"
+        % (
+            host,
+            ",".join(addresses),
+            "forced Vimeo domain" if forced_doh else "system DNS returned a TUN address",
+        )
+    )
+    templates = [item for item in result or [] if item[0] == socket.AF_INET] or result or []
+    resolved = []
+    for index, address in enumerate(addresses):
+        if templates:
+            template_family, socktype, proto, canonname, sockaddr = templates[index % len(templates)]
+        else:
+            template_family = socket.AF_INET6 if family == socket.AF_INET6 else socket.AF_INET
+            socktype = type or socket.SOCK_STREAM
+            proto = proto or (socket.IPPROTO_TCP if socktype == socket.SOCK_STREAM else socket.IPPROTO_UDP)
+            canonname = ""
+            sockaddr = ("::", port) if template_family == socket.AF_INET6 else ("0.0.0.0", port)
+        if template_family == socket.AF_INET:
+            resolved.append((template_family, socktype, proto, canonname, (address, port)))
+        else:
+            resolved.append((template_family, socktype, proto, canonname, (address,) + tuple(sockaddr[1:])))
+    return resolved
+
+
+socket.getaddrinfo = _openxiazai_getaddrinfo
 
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
             static_folder=os.path.join(BASE_DIR, "static"))
@@ -221,6 +337,10 @@ def classify(url):
             return "yt_media"
         if re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', u):
             return "yt_media"
+        # Vimeo and its player URLs must go through yt-dlp; og:video on the
+        # public page is an HTML player URL, not a downloadable media file.
+        if re.match(r'https?://(www\.|player\.)?vimeo\.com/', u):
+            return "vimeo"
         # 微博 — yt-dlp handler (supports weibo.com, t.cn, share.api.weibo.cn)
         if re.match(r'https?://(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn)/', u):
             return "weibo"
@@ -1901,6 +2021,7 @@ TYPES = {
     "ftp": "FTP",
     "ed2k": "电驴→种子搜索",
     "yt_media": "YouTube 视频",
+    "vimeo": "Vimeo 视频",
     "bilibili": "B站视频",
     "weibo": "微博视频",
     "douyin": "抖音视频",
@@ -2649,8 +2770,9 @@ class Engine:
         self.records = self._load_records()
         self.m3u8_tasks = {}
         self._m3u8_counter = 0
-        self.yt_tasks = {}      # gid -> {url, title, state, progress, ...}
-        self._yt_counter = 0
+        self._yt_persist_lock = threading.Lock()
+        self._yt_persist_last = 0
+        self.yt_tasks, self._yt_counter = self._load_yt_tasks()
         self.bili_tasks = {}    # gid -> {url, title, state, progress, ...}
         self._bili_counter = 0
         self.cf_tasks = {}      # gid -> Cloudflare browser downloads
@@ -2730,6 +2852,72 @@ class Engine:
         json.dump(self.records, open(tmp, "w"), ensure_ascii=False, indent=2)
         os.replace(tmp, RECORDS_FILE)
 
+    def _load_yt_tasks(self):
+        """Restore yt-dlp task metadata after an app restart."""
+        if not os.path.exists(YT_TASKS_FILE):
+            return {}, 0
+        try:
+            with open(YT_TASKS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            raw_tasks = data.get("tasks", {})
+            if not isinstance(raw_tasks, dict):
+                return {}, 0
+            tasks = {}
+            for gid, info in raw_tasks.items():
+                if not gid.startswith("yt_") or not isinstance(info, dict):
+                    continue
+                if not info.get("url") or not info.get("title"):
+                    continue
+                info.setdefault("state", "paused")
+                if info.get("state") in ("downloading", "fetching", "queued"):
+                    info["state"] = "paused"
+                    info["_resuming"] = True
+                    info["download_rate"] = 0
+                info.pop("_pause_requested", None)
+                info.setdefault("progress", 0)
+                info.setdefault("size", 0)
+                info.setdefault("output", "")
+                info.setdefault("format_id", None)
+                info.setdefault("added_at", time.time())
+                tasks[gid] = info
+            counter = data.get("counter", 0)
+            if not isinstance(counter, int) or counter < 0:
+                counter = 0
+            for gid in tasks:
+                match = re.match(r"^yt_(\d+)_", gid)
+                if match:
+                    counter = max(counter, int(match.group(1)) + 1)
+            return tasks, counter
+        except Exception as e:
+            log.warning("[yt_tasks] failed to load persisted tasks: %s" % str(e)[:200])
+            return {}, 0
+
+    def _save_yt_tasks(self):
+        """Atomically persist yt-dlp task metadata."""
+        try:
+            # Serialize the temporary file and rename as one operation. Multiple
+            # download threads otherwise race on the same .tmp filename.
+            with self._yt_persist_lock:
+                tasks = {gid: dict(info) for gid, info in self.yt_tasks.items()}
+                payload = {
+                    "version": 1,
+                    "counter": self._yt_counter,
+                    "tasks": tasks,
+                }
+                tmp = YT_TASKS_FILE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, YT_TASKS_FILE)
+        except Exception as e:
+            log.warning("[yt_tasks] failed to save tasks: %s" % str(e)[:200])
+
+    def _save_yt_tasks_throttled(self):
+        now = time.time()
+        if now - self._yt_persist_last < 3:
+            return
+        self._yt_persist_last = now
+        self._save_yt_tasks()
+
     def _reconcile_stopped(self):
         """Seed task metadata for tasks aria2 already knows about after a restart."""
         try:
@@ -2780,7 +2968,7 @@ class Engine:
         # All yt-dlp supported platforms (微博/抖音/TikTok/Facebook/Spotify/etc)
         yt_dlp_types = {"weibo", "douyin", "tiktok", "facebook", "spotify",
                         "netease", "kuaishou", "xiaohongshu", "ixigua",
-                        "mgtv", "iqiyi", "tencent"}
+                        "mgtv", "iqiyi", "tencent", "vimeo"}
         if t in yt_dlp_types:
             result = self._extract_yt_info(url)
             if result and result.get("ok"):
@@ -3503,6 +3691,7 @@ class Engine:
                     info['_finished_at'] = time.time()
                     finished_at = info['_finished_at']
                 if time.time() - finished_at > 30:
+                    archived_yt = False
                     if gid not in existing:
                         existing.add(gid)
                         self.records["history"].insert(0, {
@@ -3511,7 +3700,11 @@ class Engine:
                             "paths": [output] if output else [],
                             "size": info.get('size', 0), "completed_at": int(finished_at),
                         })
+                        archived_yt = True
                     del self.yt_tasks[gid]
+                    self._save_yt_tasks()
+                    if archived_yt:
+                        self._save_records()
                     continue
             downloaded = info.get('_downloaded', 0)
             total = info.get('size', 0)
@@ -4304,24 +4497,42 @@ class Engine:
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '视频'
         output_template = os.path.join(self.save_path, f"{safe_title}.%(ext)s")
 
+        existing = self.yt_tasks.get(gid, {})
+        if existing.get('_resuming'):
+            # Keep the original format and output location. A different format can
+            # change yt-dlp's intermediate filename and make the retry start over.
+            if existing.get('format_id') is not None:
+                format_id = existing['format_id']
+            if existing.get('output_template'):
+                output_template = existing['output_template']
+            elif existing.get('output'):
+                output_template = os.path.join(
+                    os.path.dirname(existing['output']), f"{safe_title}.%(ext)s"
+                )
+
         info = {
             'url': url, 'title': title, 'state': 'downloading',
             'progress': 0, 'size': 0, 'download_rate': 0,
             'format_id': format_id, 'output': '',
+            'output_template': output_template,
             'proc': None, '_last_size': 0, '_last_time': time.time(),
             '_smooth_rate': 0, 'added_at': time.time(),
         }
         # Preserve platform type from start_yt_download (e.g. weibo/douyin)
-        existing = self.yt_tasks.get(gid, {})
         if existing.get('type'):
             info['type'] = existing['type']
         # Preserve flags needed for resume and format selection
-        for k in ('_resuming', '_is_audio_only', '_stream_data'):
-            if existing.get(k):
-                info[k] = existing[k]
+        for key in ('_resuming', '_is_audio_only', '_stream_data',
+                    '_stage_completed', '_progress_filename'):
+            if key in existing:
+                info[key] = existing[key]
         if existing.get('_resuming'):
             info['added_at'] = existing.get('added_at', time.time())
+            for key in ('output', 'size', 'progress', '_downloaded', '_eta'):
+                if key in existing:
+                    info[key] = existing[key]
         self.yt_tasks[gid] = info
+        self._save_yt_tasks()
 
         # For Douyin/Kuaishou: extract a fresh direct URL before downloading
         t = classify(url) or ""
@@ -4367,22 +4578,79 @@ class Engine:
                 downloaded = d.get('downloaded_bytes', 0) or 0
                 total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0) or 0
                 speed = d.get('speed', 0) or 0
-                task['size'] = total
-                task['_downloaded'] = downloaded
+
+                filename = d.get('filename', '') or ''
+                if filename and filename != task.get('_progress_filename'):
+                    baseline = task.get('_stage_completed', 0)
+                    # After a restart, the persisted output is usually the
+                    # completed video stream while yt-dlp resumes the audio stream.
+                    if not task.get('_progress_filename'):
+                        persisted_output = task.get('output', '')
+                        if persisted_output and filename != persisted_output:
+                            try:
+                                baseline = max(baseline, os.path.getsize(persisted_output))
+                            except OSError:
+                                pass
+                    task['_progress_filename'] = filename
+                    task['_stage_completed'] = baseline
+
+                baseline = task.get('_stage_completed', 0)
+                overall_downloaded = baseline + downloaded
+                overall_total = baseline + total if total > 0 else max(
+                    task.get('size', 0), overall_downloaded
+                )
+                task['size'] = overall_total
+                task['_downloaded'] = overall_downloaded
                 task['download_rate'] = int(speed) if speed else 0
-                if total > 0:
-                    task['progress'] = round(100 * downloaded / total, 1)
+                if overall_total > 0:
+                    task['progress'] = round(100 * overall_downloaded / overall_total, 1)
                 # ETA
                 eta = d.get('eta', 0) or 0
                 task['_eta'] = eta
             elif d['status'] == 'finished':
-                task['progress'] = 99.9
-                task['_downloaded'] = task.get('size', 0)
                 filename = d.get('filename', '') or ''
+                if filename and filename != task.get('_progress_filename'):
+                    # yt-dlp emits finished without downloading hooks when an
+                    # intermediate file already exists. Count that file as a
+                    # completed stage instead of resetting the task to zero.
+                    baseline = task.get('_stage_completed', 0)
+                    first_stage = not task.get('_progress_filename')
+                    seed = task.get('output', '') if (
+                        first_stage
+                        and task.get('output', '')
+                        and filename != task.get('output', '')
+                    ) else filename
+                    try:
+                        seed_size = os.path.getsize(seed)
+                        # On restart yt-dlp reports an already-persisted video
+                        # stream as finished again. Use its size as the baseline
+                        # once; adding it to the existing baseline would double
+                        # the displayed total after every restart.
+                        if first_stage or filename == task.get('output', ''):
+                            baseline = max(baseline, seed_size)
+                        else:
+                            baseline += seed_size
+                    except OSError:
+                        pass
+                    task['_stage_completed'] = baseline
+                    task['_progress_filename'] = filename
+                    task['_downloaded'] = baseline
+                    task['size'] = max(task.get('size', 0), baseline)
+                else:
+                    baseline = task.get('_stage_completed', 0)
+                    current = max(0, task.get('_downloaded', 0) - baseline)
+                    task['_stage_completed'] = baseline + current
+                    task['_downloaded'] = task['_stage_completed']
+                    task['size'] = max(task.get('size', 0), task['_downloaded'])
+                task['progress'] = 99.9
                 task['output'] = filename
+                self._save_yt_tasks()
             elif d['status'] == 'error':
                 task['state'] = 'error'
                 task['error'] = d.get('message', '下载出错')
+                self._save_yt_tasks()
+            else:
+                self._save_yt_tasks_throttled()
 
         ydl_opts = {
             'quiet': True,
@@ -4390,6 +4658,7 @@ class Engine:
             'progress_hooks': [progress_hook],
             'outtmpl': output_template,
             'overwrites': not self.yt_tasks.get(gid, {}).get('_resuming', False),
+            'continuedl': True,
         }
         # Never merge more than one audio stream: a combined format (video+audio)
         # plus a stray "bestaudio" would otherwise pick up a dubbed track and embed
@@ -4427,13 +4696,21 @@ class Engine:
             }
             ydl_opts['proxy'] = ''
             ydl_opts['socket_timeout'] = 20
+        elif t == 'vimeo':
+            # Vimeo's webpage and HLS playlist requests can sit longer than
+            # yt-dlp's 20 second default before the CDN responds.
+            ydl_opts['socket_timeout'] = 60
+            ydl_opts['extractor_retries'] = 3
+            ydl_opts['fragment_retries'] = 10
 
         # Format selection
         if format_id:
-            # Check if format is video+audio combined or needs merging
-            # For combined formats: download single stream
-            # For video-only: merge with best audio via yt-dlp's default behavior
-            ydl_opts['format'] = format_id + '+bestaudio/bestaudio/' + format_id
+            if format_id == 'source':
+                # Vimeo's source file already contains video and audio.
+                ydl_opts['format'] = format_id
+            else:
+                # Video-only formats need a separate audio stream and a merge.
+                ydl_opts['format'] = format_id + '+bestaudio/bestaudio/' + format_id
         else:
             # Default: best quality video+audio
             ydl_opts['format'] = 'bestvideo+bestaudio/best'
@@ -4455,6 +4732,17 @@ class Engine:
         # Try download without cookies first, then with browser cookies
         last_error = None
         cookie_opts = [None, ('chrome',), ('safari',)]
+        if t == 'vimeo':
+            # Vimeo source formats require the authenticated web API client.
+            cookie_opts = [('chrome',), ('safari',), None]
+
+        def is_cookie_permission_error(exc):
+            message = str(exc).lower()
+            return isinstance(exc, PermissionError) or (
+                'operation not permitted' in message
+                and 'cookies.binarycookies' in message
+            )
+
         for cookie_opt in cookie_opts:
             try:
                 opts = dict(ydl_opts)
@@ -4476,26 +4764,43 @@ class Engine:
                                 if os.path.exists(candidate):
                                     task['output'] = candidate
                                     task['size'] = os.path.getsize(candidate)
+                                    self._save_yt_tasks()
                                     break
                         else:
                             if os.path.exists(task['output']):
                                 task['size'] = os.path.getsize(task['output'])
+                                self._save_yt_tasks()
+                    self._save_yt_tasks()
                 return  # Success, don't retry
             except Exception as e:
                 if str(e) == 'PAUSE_REQUESTED':
                     if gid in self.yt_tasks:
                         self.yt_tasks[gid]['state'] = 'paused'
                         self.yt_tasks[gid].pop('_resuming', None)
+                        self._save_yt_tasks()
                     return
+                if cookie_opt and is_cookie_permission_error(e):
+                    log.warning(
+                        "[_download_yt_thread] browser cookies unavailable gid=%s cookies=%s: %s"
+                        % (gid, cookie_opt[0], str(e)[:200])
+                    )
+                    continue
                 last_error = e
+                log.warning(
+                    "[_download_yt_thread] attempt failed gid=%s cookies=%s: %s"
+                    % (gid, 'none' if cookie_opt is None else cookie_opt[0], str(e)[:200])
+                )
                 if gid not in self.yt_tasks:
                     return
                 continue
         # All attempts failed
+        if last_error is None:
+            last_error = RuntimeError('所有下载尝试均失败')
         log.error("[_download_yt_thread] ALL ATTEMPTS FAILED for gid=%s: %s" % (gid, str(last_error)[:200]))
         if gid in self.yt_tasks:
             self.yt_tasks[gid]['state'] = 'error'
             self.yt_tasks[gid]['error'] = str(last_error)
+            self._save_yt_tasks()
 
     def _download_iqiyi_thread(self, gid, url, title, stream_data=None):
         """爱奇艺下载：重新抓 TS 分片，curl 逐段下载（带 referer/cookie），ffmpeg 合并。"""
@@ -4734,22 +5039,44 @@ class Engine:
             pass
 
     def retry_yt_download(self, gid):
-        """重试失败的 yt 下载任务：取旧任务的 url/title/format_id 重新启动。"""
+        """Retry a failed yt download in place so yt-dlp can reuse .part files."""
         info = self.yt_tasks.get(gid, {})
+        if info.get('state') != 'error':
+            return False
         url = info.get('url', '')
-        title = info.get('title', '视频下载')
-        format_id = info.get('format_id')
         if not url:
             return False
-        # 删掉旧任务，启动新任务
-        del self.yt_tasks[gid]
-        new_gid = self.start_yt_download(url, format_id=format_id, title=title)
-        return new_gid
+        title = info.get('title', '视频下载')
+        format_id = info.get('format_id')
+        stream_data = info.get('_stream_data')
+        info['_pause_requested'] = False
+        info['_resuming'] = True
+        info.pop('error', None)
+        info['state'] = 'downloading'
+        info['download_rate'] = 0
+        self._save_yt_tasks()
+        threading.Thread(
+            target=self._download_yt_thread,
+            args=(gid, url, format_id, title),
+            kwargs={'stream_data': stream_data},
+            daemon=True,
+        ).start()
+        return gid
 
     def start_yt_download(self, url, format_id=None, title=None, is_audio_only=False, stream_data=None):
         """Start a YouTube/X video download. Returns gid."""
         gid = f"yt_{self._yt_counter}_{int(time.time())}"
         self._yt_counter += 1
+        safe_title = re.sub(r'[<>:"/\\|?*]', '_', title or '视频下载').strip() or '视频下载'
+        existing_intermediate = None
+        if format_id and not is_audio_only:
+            for ext in ('mp4', 'mkv', 'webm'):
+                candidate = os.path.join(
+                    self.save_path, f"{safe_title}.f{format_id}.{ext}"
+                )
+                if os.path.isfile(candidate):
+                    existing_intermediate = candidate
+                    break
         self.yt_tasks[gid] = {
             'url': url, 'title': title or '视频下载',
             'type': classify(url),  # 正确的平台类型 (weibo/douyin/etc)
@@ -4759,6 +5086,16 @@ class Engine:
             '_downloaded': 0, '_eta': 0,
             'added_at': time.time(),
         }
+        if existing_intermediate:
+            # Reuse a completed intermediate stream instead of overwriting it.
+            # This is common after a user stops a high-quality attempt and starts
+            # the same video at a format that already has a finished stream.
+            self.yt_tasks[gid].update({
+                '_resuming': True,
+                'output': existing_intermediate,
+                'size': os.path.getsize(existing_intermediate),
+            })
+        self._save_yt_tasks()
         t = threading.Thread(target=self._download_yt_thread,
                              args=(gid, url, format_id, title or '视频下载'), kwargs={'stream_data': stream_data},
                              daemon=True)
@@ -4789,6 +5126,7 @@ class Engine:
                     except Exception:
                         pass
             del self.yt_tasks[gid]
+            self._save_yt_tasks()
             return True
         return False
 
@@ -4800,6 +5138,7 @@ class Engine:
                 return False
             info['_pause_requested'] = True
             info['state'] = 'paused'
+            self._save_yt_tasks()
             return True
         return False
 
@@ -4818,6 +5157,7 @@ class Engine:
             info['_pause_requested'] = False
             info['_resuming'] = True
             info['download_rate'] = 0
+            self._save_yt_tasks()
             t = threading.Thread(target=self._download_yt_thread,
                                  args=(gid, url, format_id, title),
                                  kwargs={'stream_data': stream_data}, daemon=True)
