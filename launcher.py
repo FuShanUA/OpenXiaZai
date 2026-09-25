@@ -41,16 +41,12 @@ PORT = 5566
 
 
 def _app_icon():
-    """Use the project icon when running from source; bundles use their own icon."""
+    """Use the project icon on platforms without a bundled app icon."""
     if getattr(sys, "frozen", False) and sys.platform == "darwin":
-        contents = os.path.dirname(os.path.dirname(sys.executable))
-        path = os.path.join(contents, "Resources", "app_icon.icns")
-        return path if os.path.isfile(path) else None
+        return None
 
     root = os.path.dirname(os.path.abspath(__file__))
-    if sys.platform == "darwin":
-        path = os.path.join(root, "app_icon.icns")
-    elif sys.platform == "win32":
+    if sys.platform == "win32":
         path = os.path.join(root, "assets", "icon_256.png")
     else:
         return None
@@ -104,7 +100,12 @@ def main():
         height=780,
         min_size=(900, 600),
     )
-    webview.start(icon=_app_icon())
+    if sys.platform == "darwin":
+        # macOS already uses CFBundleIconFile; setting it again replaces the
+        # correctly sized Dock icon with a raw runtime image.
+        webview.start()
+    else:
+        webview.start(icon=_app_icon())
 
 
 if __name__ == "__main__":
