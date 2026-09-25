@@ -38,6 +38,23 @@ sys.excepthook = _excepthook
 PORT = 5566
 
 
+def _app_icon():
+    """Use the project icon when running from source; bundles use their own icon."""
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        contents = os.path.dirname(os.path.dirname(sys.executable))
+        path = os.path.join(contents, "Resources", "app_icon.icns")
+        return path if os.path.isfile(path) else None
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == "darwin":
+        path = os.path.join(root, "app_icon.icns")
+    elif sys.platform == "win32":
+        path = os.path.join(root, "assets", "icon_256.png")
+    else:
+        return None
+    return path if os.path.isfile(path) else None
+
+
 def _serve():
     """在 daemon 线程里跑 Flask 服务。"""
     from werkzeug.serving import make_server
@@ -70,7 +87,7 @@ def main():
         height=780,
         min_size=(900, 600),
     )
-    webview.start()
+    webview.start(icon=_app_icon())
     # 用户关闭窗口后,清理 aria2c 子进程
     try:
         engine.proc.terminate()
