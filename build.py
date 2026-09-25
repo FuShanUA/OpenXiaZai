@@ -95,6 +95,7 @@ a = Analysis(
     datas=[
         ('{os.path.join(ROOT, "templates")}', 'templates'),
         ('{os.path.join(ROOT, "static")}', 'static'),
+        ('{os.path.join(ROOT, "grab_stream.py")}', '.'),
     ],
     hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
     hookspath=[],
@@ -108,9 +109,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='{NAME}',
     debug=False,
     bootloader_ignore_signals=False,
@@ -125,8 +125,18 @@ exe = EXE(
     icon='{ICON_MAC}',
 )
 
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='{NAME}',
+)
+
+app = BUNDLE(
+    coll,
     name='{NAME}.app',
     icon='{ICON_MAC}',
     bundle_identifier='com.codex.openxiazai',

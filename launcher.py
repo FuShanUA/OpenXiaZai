@@ -7,6 +7,8 @@ import sys
 import time
 import tempfile
 import threading
+import atexit
+import signal
 
 # 确保能 import 同目录的 app 模块(打包后同样生效)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -62,6 +64,18 @@ def _serve():
     server.serve_forever()
 
 
+def _cleanup():
+    try:
+        engine.shutdown()
+    except Exception:
+        pass
+
+
+def _signal_cleanup(signum, _frame):
+    _cleanup()
+    os._exit(0)
+
+
 def _wait_ready(timeout=20):
     import requests
     deadline = time.time() + timeout
@@ -75,6 +89,9 @@ def _wait_ready(timeout=20):
 
 
 def main():
+    atexit.register(_cleanup)
+    signal.signal(signal.SIGTERM, _signal_cleanup)
+    signal.signal(signal.SIGINT, _signal_cleanup)
     os.makedirs(DEFAULT_SAVE, exist_ok=True)
     threading.Thread(target=_serve, daemon=True).start()
     if not _wait_ready():
@@ -88,15 +105,6 @@ def main():
         min_size=(900, 600),
     )
     webview.start(icon=_app_icon())
-    # 用户关闭窗口后,清理 aria2c 子进程
-    try:
-        engine.proc.terminate()
-        engine.proc.wait(timeout=5)
-    except Exception:
-        try:
-            engine.proc.kill()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

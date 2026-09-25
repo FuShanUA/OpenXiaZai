@@ -18,7 +18,30 @@ from flask import Flask, request, jsonify, render_template, Response
 # ---------------------------------------------------------------------------
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resource_dir():
+    """Return the directory containing bundled read-only resources."""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _data_dir():
+    """Keep writable app state outside PyInstaller's temporary extraction dir."""
+    if not getattr(sys, "frozen", False):
+        return _resource_dir()
+    if IS_MACOS:
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "OpenXiaZai")
+    if IS_WINDOWS:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "OpenXiaZai")
+    return os.path.join(os.path.expanduser("~"), ".local", "share", "OpenXiaZai")
+
+
+BASE_DIR = _resource_dir()
+DATA_DIR = _data_dir()
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # Windows: suppress console windows for ALL subprocess calls.
 # Without this, every subprocess.Popen/run spawns a flashing cmd.exe window.
@@ -110,11 +133,11 @@ for _venv_base in [
                 sys.path.append(_sp)
 
 DEFAULT_SAVE = _downloads_dir()
-RECORDS_FILE = os.path.join(BASE_DIR, "records.json")
-YT_TASKS_FILE = os.path.join(BASE_DIR, "yt_tasks.json")
+RECORDS_FILE = os.path.join(DATA_DIR, "records.json")
+YT_TASKS_FILE = os.path.join(DATA_DIR, "yt_tasks.json")
 
 import logging
-LOG_FILE = os.path.join(BASE_DIR, "debug.log")
+LOG_FILE = os.path.join(DATA_DIR, "debug.log")
 _log_handlers = [logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')]
 if sys.stderr is not None:
     _log_handlers.append(logging.StreamHandler())
@@ -2764,6 +2787,7 @@ class Engine:
         self.uploads = 4        # upload slots per task (BT)
         self.aria = Aria2()
         self.proc = None
+        self.external_proc_pid = None
         self._start_aria2()
         # in-memory extra metadata for tasks not kept by aria2
         self.tasks = {}   # gid -> {type, url, submitted, picked_files}
@@ -2782,6 +2806,26 @@ class Engine:
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
         aria2c = _ARIA2C
+        try:
+            response = requests.post(
+                self.aria.url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "startup",
+                    "method": "aria2.getVersion",
+                    "params": ["token:" + self.aria.secret],
+                },
+                timeout=1,
+            )
+            payload = response.json()
+            if "result" in payload:
+                self.external_proc_pid = self._find_aria2_pid()
+                if self.external_proc_pid:
+                    log.warning("[aria2] reusing existing process pid=%s" % self.external_proc_pid)
+                    return
+        except Exception:
+            pass
+
         args = [
             aria2c, "--enable-rpc", f"--rpc-listen-port={self.aria.port}",
             "--rpc-listen-all=false", "--rpc-allow-origin-all",
@@ -2803,18 +2847,18 @@ class Engine:
             "--rpc-max-request-size=20M",
             "--bt-remove-unselected-file=true",
             # Session persistence - save for crash recovery (not restored on restart)
-            "--save-session=" + os.path.join(BASE_DIR, ".aria2_session"),
+            "--save-session=" + os.path.join(DATA_DIR, ".aria2_session"),
             "--save-session-interval=30",
         ]
         # Always start fresh: clear any stale session file from previous run
-        session_file = os.path.join(BASE_DIR, ".aria2_session")
+        session_file = os.path.join(DATA_DIR, ".aria2_session")
         if os.path.exists(session_file):
             os.remove(session_file)
         # Add DHT entry points as separate args
         for ep in DHT_ENTRY_POINTS:
             args.append("--dht-entry-point=" + ep)
         # Persist DHT routing table between sessions for faster magnet resolution
-        args.append("--dht-file-path=" + os.path.join(BASE_DIR, ".aria2_dht.dat"))
+        args.append("--dht-file-path=" + os.path.join(DATA_DIR, ".aria2_dht.dat"))
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # wait for RPC to come up
         for _ in range(40):
@@ -2824,6 +2868,48 @@ class Engine:
                 return
             except Exception:
                 time.sleep(0.25)
+
+    def _find_aria2_pid(self):
+        """Find the authenticated aria2 listener so it can be cleaned up later."""
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", "-tiTCP:6800", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            for pid_text in result.stdout.split():
+                try:
+                    pid = int(pid_text)
+                except ValueError:
+                    continue
+                return pid
+        except Exception:
+            pass
+        return None
+
+    def shutdown(self):
+        """Stop aria2 whether it was started by this process or reused after a crash."""
+        proc = self.proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+                return
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return
+
+        if self.external_proc_pid:
+            try:
+                os.kill(self.external_proc_pid, 15)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log.warning("[aria2] failed to stop reused process: %s" % e)
 
     def _apply_settings(self):
         opts = {
