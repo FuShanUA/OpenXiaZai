@@ -254,6 +254,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
     <div id="biliLoggedIn" style="display:none;font-size:12px;color:var(--accent2);margin-top:6px"></div>
     <div class="row" style="margin-top:10px;gap:8px">
       <button class="btn go" id="biliDownload">立即下载</button>
+      <button class="btn go" id="biliDownloadAll" style="display:none">下载全部</button>
       <button class="btn" id="biliAudioOnly">仅下载音频</button>
       <button class="btn" id="biliLoginBtn">扫码登录</button>
       <button class="btn" id="biliLogoutBtn" style="display:none;color:var(--danger)">退出登录</button>
@@ -992,8 +993,15 @@ let biliSelectedQuality=null;
 let biliSelectedCodec=null;
 let biliSelectedAudio=null;
 let biliSelectedPage=null;
+let biliSourceUrl='';
+let biliBatchItems=[];
 function showBiliPreview(data,url){
   biliData=data;
+  biliSourceUrl=url;
+  biliBatchItems=(data.batch_list||[]).filter(item=>item.bvid&&item.cid);
+  $('biliDownloadAll').style.display=biliBatchItems.length>1?'':'none';
+  $('biliDownloadAll').disabled=false;
+  $('biliDownloadAll').textContent='下载全部';
   biliSelectedQuality=null;
   biliSelectedCodec=null;
   biliSelectedAudio=null;
@@ -1014,16 +1022,17 @@ function showBiliPreview(data,url){
   if(data.poster){$('biliPoster').src='/api/bili_poster?url='+encodeURIComponent(data.poster);$('biliPoster').style.display=''}
   else{$('biliPoster').style.display='none'}
 
-  // 分P选择
+  // 分P/剧集选择
   const pages=data.page_list||[];
   const pageEl=$('biliPages');
   pageEl.innerHTML='';
   if(pages.length>1){
     $('biliPageSelect').style.display='block';
+    $('biliPageSelect').querySelector('div').textContent=data.is_season?'选择剧集：':'选择分P：';
     pages.forEach(p=>{
       const b=document.createElement('button');
       b.className='btn sm'+(p.page===biliSelectedPage?' primary':'');
-      b.textContent='P'+p.page+' '+esc(p.title||'');
+      b.textContent=(data.is_season?'':'P'+p.page+' ')+esc(p.title||'');
       b.title=esc(p.title||'')+' · '+p.duration+'秒';
       b.dataset.page=p.page;
       b.onclick=async()=>{
@@ -1031,8 +1040,12 @@ function showBiliPreview(data,url){
         pageEl.querySelectorAll('.btn.sm').forEach(x=>x.classList.remove('primary'));
         b.classList.add('primary');
         // Re-fetch info for new page
-        const res=await post('/api/bili_info',{url:url,page:p.page});
+        const res=await post('/api/bili_info',data.is_season?{url:p.url}:{url:url,page:p.page});
         if(res&&res.ok){updateBiliFormats(res)}
+        if(res&&res.ok&&data.is_season){
+          biliData.selected_page=p;
+          biliData.is_season=true;
+        }
       };
       pageEl.appendChild(b);
     });
@@ -1053,7 +1066,14 @@ function showBiliPreview(data,url){
 }
 
 function updateBiliFormats(data){
+  if(biliData){
+    if(!data.batch_list)data.batch_list=biliData.batch_list;
+    if(!data.url)data.url=biliData.url||biliSourceUrl;
+    if(!data.is_season&&biliData.is_season)data.is_season=biliData.is_season;
+  }
   biliData=data;
+  biliBatchItems=(data.batch_list||[]).filter(item=>item.bvid&&item.cid);
+  $('biliDownloadAll').style.display=biliBatchItems.length>1?'':'none';
   const fmts=data.formats||[];
   const audioFmts=data.audio_formats||[];
   const fmtEl=$('biliFormats');
@@ -1155,18 +1175,28 @@ function updateBiliFormats(data){
   }
 }
 
-function hideBiliPreview(){biliData=null;$('biliPreview').style.display='none';$('url').value='';window._clipLastText=''}
+function hideBiliPreview(){
+  biliData=null;biliSourceUrl='';biliBatchItems=[];
+  $('biliPreview').style.display='none';$('url').value='';window._clipLastText='';
+  $('biliDownloadAll').style.display='none';$('biliDownloadAll').disabled=false;
+  $('biliDownloadAll').textContent='下载全部';
+}
 async function doBiliDownload(audioOnly){
   if(!biliData)return;
   const fmt=biliData.formats||[];
   // Find the selected format to check if it's legacy
   const selected=fmt.find(f=>f.quality_id===biliSelectedQuality&&f.codec_id===biliSelectedCodec);
   const isLegacy=selected&&selected.is_legacy;
+  let title=biliData.title||'B站视频';
+  if(biliData.page_list?.length>1&&biliData.selected_page){
+    const page=biliData.selected_page;
+    title=biliData.is_season?(page.title||title):`${title} - P${String(page.page).padStart(2,'0')} ${page.title||''}`.trim();
+  }
   const res=await post('/api/download_bili',{
     bvid:biliData.bvid,
     cid:biliData.cid,
     aid:biliData.aid,
-    title:biliData.title,
+    title,
     quality_id:audioOnly?0:(biliSelectedQuality||32),
     codec_id:audioOnly?0:(biliSelectedCodec||7),
     audio_id:audioOnly?0:(biliSelectedAudio||0),
@@ -1176,7 +1206,34 @@ async function doBiliDownload(audioOnly){
   else{await customAlert(res?.error||'下载失败');return false}
   return true;
 }
+async function doBiliDownloadAll(){
+  if(!biliBatchItems.length)return;
+  const fmt=biliData?.formats||[];
+  const selected=fmt.find(f=>f.quality_id===biliSelectedQuality&&f.codec_id===biliSelectedCodec);
+  const isLegacy=selected&&selected.is_legacy;
+  const btn=$('biliDownloadAll');
+  btn.disabled=true;btn.textContent='正在加入…';
+  try{
+    const res=await post('/api/download_bili_batch',{
+      items:biliBatchItems,
+      quality_id:biliSelectedQuality||32,
+      codec_id:biliSelectedCodec||7,
+      audio_id:biliSelectedAudio||0,
+      is_legacy:isLegacy,
+    });
+    if(res&&res.ok&&res.created>0){
+      hideBiliPreview();switchTab('tasks');
+      return true;
+    }
+    await customAlert(res?.error||'批量下载失败');
+  }catch(e){
+    await customAlert('批量下载失败: '+e.message);
+  }
+  btn.disabled=false;btn.textContent='下载全部';
+  return false;
+}
 $('biliDownload').onclick=async()=>{await doBiliDownload(false)};
+$('biliDownloadAll').onclick=async()=>{await doBiliDownloadAll()};
 $('biliAudioOnly').onclick=async()=>{await doBiliDownload(true)};
 $('biliCancel').onclick=hideBiliPreview;
 
@@ -1258,7 +1315,13 @@ function renderQrToCanvas(text){
 async function pollBiliQr(){
   if(!biliQrKey)return;
   try{
-    const res=await (await fetch('/api/bili_qr_poll?qrcode_key='+biliQrKey)).json();
+    const res=await (await fetch('/api/bili_qr_poll?qrcode_key='+encodeURIComponent(biliQrKey))).json();
+    if(!res||!res.ok){
+      if(biliQrTimer){clearInterval(biliQrTimer);biliQrTimer=null}
+      $('biliQrStatus').textContent=res?.message||'扫码登录失败，请刷新二维码重试';
+      $('biliQrStatus').style.color='var(--danger)';
+      return;
+    }
     const code=res.code;
     if(code===0){
       // Login success!
@@ -1279,7 +1342,7 @@ async function pollBiliQr(){
     }else if(code===86101){
       $('biliQrStatus').textContent='等待扫码…';
       $('biliQrStatus').style.color='var(--muted)';
-    }else if(code===86102){
+    }else if(code===86090){
       $('biliQrStatus').textContent='已扫码，请在手机上确认登录…';
       $('biliQrStatus').style.color='var(--accent)';
     }else{

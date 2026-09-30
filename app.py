@@ -11,6 +11,7 @@ import threading
 import socket
 import ipaddress
 import requests
+from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, render_template, Response
 
 # ---------------------------------------------------------------------------
@@ -2121,7 +2122,7 @@ BILI_QUALITY_MAP = {
     64: '720P', 48: '720P 60帧', 32: '480P', 16: '360P',
 }
 BILI_CODEC_MAP = {7: 'H264', 12: 'H265', 13: 'AV1'}
-BILI_AUDIO_MAP = {30250: '杜比全景声', 30251: 'Hi-Res', 30232: '192Kbps', 30216: '128Kbps'}
+BILI_AUDIO_MAP = {30250: '杜比全景声', 30251: 'Hi-Res', 30280: '320Kbps', 30232: '192Kbps', 30216: '128Kbps'}
 
 # B站扫码登录 — 生成二维码、轮询扫码状态、自动保存Cookie
 BILI_QR_HEADERS = {
@@ -2170,12 +2171,16 @@ def _bili_qr_generate():
 
 def _bili_qr_poll(qrcode_key):
     """轮询B站扫码状态，返回扫码结果。
-    状态码：86101=未扫码，86102=已扫码待确认，0=已确认成功
+    状态码：86101=未扫码，86090=已扫码待确认，0=已确认成功
     成功时返回 SESSDATA 等 cookie 信息，自动保存到文件。
     """
-    poll_url = f'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}'
-    r = requests.get(poll_url, headers=BILI_QR_HEADERS, timeout=10)
-    data = r.json()
+    poll_url = 'https://passport.bilibili.com/x/passport-login/web/qrcode/poll'
+    try:
+        r = requests.get(poll_url, params={'qrcode_key': qrcode_key},
+                         headers=BILI_QR_HEADERS, timeout=10)
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"ok": False, "code": -1, "message": f"查询扫码状态失败：{e}"}
 
     result = data.get('data', {}) or {}
     code = result.get('code', -1)
@@ -2184,44 +2189,24 @@ def _bili_qr_poll(qrcode_key):
     refresh_token = result.get('refresh_token', '')
 
     if code == 0:
-        # Success! Extract SESSDATA from response cookies
-        sessdata = ''
-        # The API returns cookies in the 'Set-Cookie' header of the response
-        # or in the response body's 'url' field
-        # Let's parse from response headers
-        cookie_headers = r.headers.get('Set-Cookie', '')
-        for part in cookie_headers.split(','):
-            part = part.strip()
-            if 'SESSDATA' in part:
-                # Extract value: "SESSDATA=xxx; Path=..."
-                m = re.match(r'SESSDATA=([^;]+)', part)
-                if m:
-                    sessdata = m.group(1)
-                    break
-
-        # If SESSDATA not in headers, try parsing from the response body
+        # The poll response sets cookies for .bilibili.com. requests parses
+        # them into r.cookies; the cross-domain URL is kept as a fallback.
+        sessdata = r.cookies.get('SESSDATA', '')
         if not sessdata:
-            # Some B站 API versions return it differently
-            # Check the redirect_url for cookie info
             redirect_url = result.get('url', '')
             if redirect_url:
-                # Parse SESSDATA from URL parameters
-                from urllib.parse import urlparse, parse_qs
                 parsed = urlparse(redirect_url)
                 qs = parse_qs(parsed.query)
-                if 'SESSDATA' in qs:
-                    sessdata = qs['SESSDATA'][0]
-
-        # Also check the response JSON body directly (newer API)
-        if not sessdata and result.get('SESSDATA'):
-            sessdata = result['SESSDATA']
+                sessdata = qs.get('SESSDATA', [''])[0]
+        if not sessdata:
+            sessdata = result.get('SESSDATA', '')
 
         if sessdata:
-            # Auto-save to cookie file
             cookie_data = {"SESSDATA": sessdata}
             if refresh_token:
                 cookie_data["refresh_token"] = refresh_token
-            json.dump(cookie_data, open(_BILI_COOKIE_FILE, "w"))
+            with open(_BILI_COOKIE_FILE, "w") as f:
+                json.dump(cookie_data, f)
             return {
                 "ok": True,
                 "code": 0,
@@ -2241,8 +2226,8 @@ def _bili_qr_poll(qrcode_key):
 
     elif code == 86101:
         return {"ok": True, "code": 86101, "message": "等待扫码"}
-    elif code == 86102:
-        return {"ok": True, "code": 86102, "message": "已扫码，等待确认"}
+    elif code == 86090:
+        return {"ok": True, "code": 86090, "message": "已扫码，等待确认"}
     else:
         return {"ok": False, "code": code, "message": message or "扫码登录失败"}
 
@@ -2422,6 +2407,20 @@ def _extract_bili_video(bvid, page=1, sessdata=None):
     # Combine: legacy formats first (no login needed!), then DASH formats
     all_formats = legacy_formats + dash_formats
 
+    batch_list = []
+    for p in page_list:
+        item_title = title
+        if len(page_list) > 1:
+            item_title = f"{title} - P{p['page']:02d} {p['title']}".strip()
+        batch_list.append({
+            'page': p['page'],
+            'title': item_title,
+            'bvid': bvid,
+            'aid': aid,
+            'cid': p.get('cid'),
+            'duration': p.get('duration', 0),
+        })
+
     return {
         "ok": True, "type": "bilibili",
         "title": title, "poster": pic,
@@ -2430,6 +2429,7 @@ def _extract_bili_video(bvid, page=1, sessdata=None):
         "platform": "B站",
         "bvid": bvid, "aid": aid, "cid": cid,
         "selected_page": selected_page, "page_list": page_list,
+        "batch_list": batch_list,
         "formats": all_formats, "audio_formats": audio_formats,
         "has_login": bool(cookies),
         "has_legacy": bool(legacy_formats),
@@ -2437,50 +2437,26 @@ def _extract_bili_video(bvid, page=1, sessdata=None):
     }
 
 
-def _extract_bili_bangumi(epid, sessdata=None):
-    """从B站番剧 ep 链接提取视频信息。
-    番剧/影视剧需要 pgc API 获取 episode → cid，再用 playurl 获取流。
-    """
-    cookies = sessdata or _get_bili_cookie()
-    headers = {**BILI_HEADERS}
-    if cookies:
-        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
-
-    # Get episode info from pgc API
-    api_url = f'https://api.bilibili.com/pgc/view/web/episode?ep_id={epid}'
-    r = requests.get(api_url, headers=headers, timeout=10)
-    data = r.json()
-    if data.get('code') != 0:
-        # Try alternate: get season info, find the ep
-        return {"ok": False, "error": f"获取番剧信息失败：{data.get('message', '未知错误')}。可能需要登录或该番剧不可用。", "type": "bilibili"}
-
-    result = data.get('result', {}) or {}
-    title = result.get('share_copy', '') or result.get('long_title', '') or '番剧'
-    pic = result.get('cover', '') or ''
-    duration = result.get('duration', 0) or 0
-    bvid = result.get('bvid', '') or ''
-    cid = result.get('cid', 0) or 0
-    aid = result.get('aid', 0) or 0
-
-    if not bvid or not cid:
-        return {"ok": False, "error": "无法获取番剧视频信息，可能需要登录Cookie。", "type": "bilibili"}
-
-    # Reuse the video extraction logic with the obtained bvid/cid
+def _extract_bili_dash_formats(aid, cid, headers):
+    """Fetch DASH format lists for a Bilibili page or bangumi episode."""
     playurl = f'https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=120&fnval=16&fourk=1'
-    r2 = requests.get(playurl, headers=headers, timeout=10)
-    stream_data = r2.json()
+    try:
+        r = requests.get(playurl, headers=headers, timeout=10)
+        stream_data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"ok": False, "error": f"获取视频流失败：{e}"}
     if stream_data.get('code') != 0:
-        return {"ok": False, "error": f"获取视频流失败：{stream_data.get('message', '未知错误')}", "type": "bilibili"}
+        return {"ok": False, "error": f"获取视频流失败：{stream_data.get('message', '未知错误')}"}
 
-    dash = stream_data['data'].get('dash', {}) or {}
+    dash = stream_data.get('data', {}).get('dash', {}) or {}
     video_streams = dash.get('video', []) or []
     audio_streams = dash.get('audio', []) or []
-
     formats = []
     seen = set()
     for v in video_streams:
         qid, codec = v.get('id', 0), v.get('codecid', 0)
-        if (qid, codec) in seen: continue
+        if (qid, codec) in seen:
+            continue
         seen.add((qid, codec))
         formats.append({
             'quality_id': qid, 'codec_id': codec,
@@ -2490,20 +2466,77 @@ def _extract_bili_bangumi(epid, sessdata=None):
             'bandwidth': v.get('bandwidth', 0),
             'video_url': v.get('baseUrl', ''), 'video_backup_urls': v.get('backupUrl', []),
             'mimeType': v.get('mimeType', ''), 'is_video': True,
+            'is_dash': True,
         })
 
     audio_formats = []
     seen_audio = set()
     for a in audio_streams:
-        aid_ = a.get('id', 0)
-        if aid_ in seen_audio: continue
-        seen_audio.add(aid_)
+        audio_id = a.get('id', 0)
+        if audio_id in seen_audio:
+            continue
+        seen_audio.add(audio_id)
         audio_formats.append({
-            'audio_id': aid_, 'label': BILI_AUDIO_MAP.get(aid_, f'{aid_}Kbps'),
+            'audio_id': audio_id, 'label': BILI_AUDIO_MAP.get(audio_id, f'{audio_id}Kbps'),
             'bandwidth': a.get('bandwidth', 0),
             'audio_url': a.get('baseUrl', ''), 'audio_backup_urls': a.get('backupUrl', []),
             'mimeType': a.get('mimeType', ''), 'is_audio': True,
         })
+    return {"ok": True, "formats": formats, "audio_formats": audio_formats}
+
+
+def _extract_bili_bangumi(epid, sessdata=None):
+    """从B站番剧 ep 链接提取视频信息。
+    B站 episode API 已下线，改用 season API 定位指定剧集。
+    """
+    cookies = sessdata or _get_bili_cookie()
+    headers = {**BILI_HEADERS}
+    if cookies:
+        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+
+    api_url = f'https://api.bilibili.com/pgc/view/web/season?ep_id={epid}'
+    try:
+        r = requests.get(api_url, headers=headers, timeout=10)
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"ok": False, "error": f"获取番剧信息失败：{e}", "type": "bilibili"}
+    if data.get('code') != 0:
+        return {"ok": False, "error": f"获取番剧信息失败：{data.get('message', '未知错误')}。可能需要登录或该番剧不可用。", "type": "bilibili"}
+
+    result = data.get('result', {}) or {}
+    season_title = result.get('title', '') or '番剧'
+    episodes = [
+        ep for ep in (result.get('episodes', []) or [])
+        if ep.get('section_type', 0) == 0
+        and not ep.get('pv', 0)
+        and not ep.get('is_view_hide', False)
+    ]
+    episode = next((ep for ep in episodes if ep.get('id') == epid), None)
+    if not episode:
+        return {"ok": False, "error": "未在该番剧正片中找到指定剧集", "type": "bilibili"}
+
+    episode_index = episodes.index(episode) + 1
+    episode_title = (episode.get('long_title', '') or episode.get('title', '') or '').strip()
+    numbered_title = f"第{episode_index:02d}集"
+    if episode_title and episode_title not in ('正片', numbered_title, f"第{episode_index}集"):
+        title = f"{season_title} - {numbered_title} {episode_title}"
+    else:
+        title = f"{season_title} - {numbered_title}"
+    pic = episode.get('cover', '') or result.get('cover', '') or ''
+    duration = (episode.get('duration', 0) or 0) / 1000
+    bvid = episode.get('bvid', '') or ''
+    cid = episode.get('cid', 0) or 0
+    aid = episode.get('aid', 0) or 0
+
+    if not bvid or not cid:
+        return {"ok": False, "error": "无法获取番剧视频信息，可能需要登录Cookie。", "type": "bilibili"}
+
+    stream_formats = _extract_bili_dash_formats(aid, cid, headers)
+    if not stream_formats.get('ok'):
+        return {"ok": False, "error": stream_formats.get('error', '获取视频流失败'),
+                "type": "bilibili"}
+    formats = stream_formats['formats']
+    audio_formats = stream_formats['audio_formats']
 
     return {
         "ok": True, "type": "bilibili",
@@ -2511,10 +2544,98 @@ def _extract_bili_bangumi(epid, sessdata=None):
         "m3u8_url": "", "magnet": "",
         "duration": duration, "uploader": '', "description": '',
         "platform": "B站番剧", "bvid": bvid, "aid": aid, "cid": cid,
-        "selected_page": {'page': 1, 'title': title, 'cid': cid, 'duration': duration},
-        "page_list": [{'page': 1, 'title': title, 'cid': cid, 'duration': duration}],
+        "selected_page": {
+            'page': episode_index, 'title': title, 'cid': cid,
+            'duration': duration, 'ep_id': episode.get('id'),
+            'url': episode.get('share_url', '') or episode.get('link', ''),
+        },
+        "page_list": [{
+            'page': episode_index, 'title': title, 'cid': cid,
+            'duration': duration, 'ep_id': episode.get('id'),
+            'url': episode.get('share_url', '') or episode.get('link', ''),
+        }],
         "formats": formats, "audio_formats": audio_formats,
         "has_login": bool(cookies), "bili_source": True, "is_bangumi": True,
+    }
+
+
+def _extract_bili_season(season_id, sessdata=None):
+    """Extract all main episodes from a Bilibili bangumi season URL."""
+    cookies = sessdata or _get_bili_cookie()
+    headers = {**BILI_HEADERS}
+    if cookies:
+        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+
+    api_url = f'https://api.bilibili.com/pgc/view/web/season?season_id={season_id}'
+    try:
+        r = requests.get(api_url, headers=headers, timeout=10)
+        data = r.json()
+    except (requests.RequestException, ValueError) as e:
+        return {"ok": False, "error": f"获取番剧季信息失败：{e}", "type": "bilibili"}
+    if data.get('code') != 0:
+        return {
+            "ok": False,
+            "error": f"获取番剧季信息失败：{data.get('message', '未知错误')}",
+            "type": "bilibili",
+        }
+
+    result = data.get('result', {}) or {}
+    season_title = result.get('title', '') or '番剧'
+    episodes = [
+        ep for ep in (result.get('episodes', []) or [])
+        if ep.get('section_type', 0) == 0
+        and not ep.get('pv', 0)
+        and not ep.get('is_view_hide', False)
+    ]
+    if not episodes:
+        return {"ok": False, "error": "该番剧季没有可下载剧集", "type": "bilibili"}
+
+    batch_list = []
+    for index, ep in enumerate(episodes, 1):
+        ep_title = (ep.get('long_title', '') or ep.get('title', '') or '').strip()
+        numbered_title = f"第{index:02d}集"
+        if ep_title and ep_title not in ('正片', numbered_title, f"第{index}集"):
+            item_title = f"{season_title} - {numbered_title} {ep_title}"
+        else:
+            item_title = f"{season_title} - {numbered_title}"
+        batch_list.append({
+            'page': index,
+            'title': item_title,
+            'ep_id': ep.get('id') or ep.get('ep_id'),
+            'bvid': ep.get('bvid', '') or '',
+            'aid': ep.get('aid', 0) or 0,
+            'cid': ep.get('cid', 0) or 0,
+            'duration': (ep.get('duration', 0) or 0) / 1000,
+            'url': ep.get('share_url', '') or ep.get('link', ''),
+        })
+
+    first = batch_list[0]
+    if not first.get('ep_id') or not first.get('bvid') or not first.get('cid'):
+        return {"ok": False, "error": "番剧季剧集信息不完整", "type": "bilibili"}
+
+    stream_formats = _extract_bili_dash_formats(first['aid'], first['cid'], headers)
+    if not stream_formats.get('ok'):
+        return {"ok": False, "error": stream_formats.get('error', '获取视频流失败'),
+                "type": "bilibili"}
+
+    return {
+        "ok": True, "type": "bilibili",
+        'title': season_title,
+        'poster': result.get('cover', '') or '',
+        'm3u8_url': '', 'magnet': '',
+        'description': (result.get('evaluate', '') or '')[:200],
+        'duration': first.get('duration', 0),
+        'uploader': '', 'platform': 'B站番剧',
+        'bvid': first.get('bvid'),
+        'aid': first.get('aid'),
+        'cid': first.get('cid'),
+        'selected_page': first,
+        'page_list': batch_list,
+        'batch_list': batch_list,
+        'is_season': True,
+        'formats': stream_formats['formats'],
+        'audio_formats': stream_formats['audio_formats'],
+        'has_login': bool(cookies), 'bili_source': True, 'is_bangumi': True,
     }
 
 
@@ -2799,9 +2920,14 @@ class Engine:
         self.yt_tasks, self._yt_counter = self._load_yt_tasks()
         self.bili_tasks = {}    # gid -> {url, title, state, progress, ...}
         self._bili_counter = 0
+        self._bili_queue = []
+        self._bili_queue_lock = threading.Lock()
+        self._bili_queue_cv = threading.Condition(self._bili_queue_lock)
+        self._bili_queue_active = set()
         self.cf_tasks = {}      # gid -> Cloudflare browser downloads
         self._cf_counter = 0
         self._format_m3u8_map = {}  # (url, format_id) -> direct video URL
+        threading.Thread(target=self._bili_queue_worker, daemon=True).start()
 
     def _start_aria2(self):
         os.makedirs(self.save_path, exist_ok=True)
@@ -3242,6 +3368,8 @@ class Engine:
         if uploads is not None:
             self.uploads = max(0, int(uploads))
         self._apply_settings()
+        with self._bili_queue_cv:
+            self._bili_queue_cv.notify_all()
         return True
 
     def set_destination(self, path):
@@ -5263,8 +5391,7 @@ class Engine:
         elif mode == 'bangumi':
             return _extract_bili_bangumi(id_)
         elif mode == 'season':
-            # For season URLs, we'd need more logic; return basic error
-            return {"ok": False, "error": "番剧系列链接请使用具体剧集链接（ep开头）", "type": "bilibili"}
+            return _extract_bili_season(id_)
         return {"ok": False, "error": "无法识别B站链接", "type": "bilibili"}
 
     def _download_bili_thread(self, gid, video_url, audio_url, title, video_backup_urls=None, audio_backup_urls=None):
@@ -5281,12 +5408,13 @@ class Engine:
         video_tmp = output_path + '.video.tmp.mp4'
         audio_tmp = output_path + '.audio.tmp.m4a'
 
-        info = {
-            'url': '', 'title': title, 'state': 'downloading',
+        info = self.bili_tasks.setdefault(gid, {})
+        info.update({
+            'url': info.get('url', ''), 'title': title, 'state': 'downloading',
             'progress': 0, 'size': 0, 'download_rate': 0,
             'output': output_path,
-            'added_at': time.time(),
-        }
+            'added_at': info.get('added_at', time.time()),
+        })
         self.bili_tasks[gid] = info
 
         headers_args = [
@@ -5418,7 +5546,126 @@ class Engine:
             self.bili_tasks[gid]['state'] = 'error'
             self.bili_tasks[gid]['error'] = str(e)
 
-    def start_bili_download(self, bvid, cid, quality_id, codec_id, audio_id, title, aid=None, is_legacy=False):
+    def _prepare_bili_dash_download(self, gid, bvid, cid, quality_id, codec_id,
+                                    audio_id, title, aid=None, duration=0):
+        """Fetch DASH streams for an existing Bilibili task and start ffmpeg."""
+        cookies = _get_bili_cookie()
+        headers = {**BILI_HEADERS}
+        if cookies:
+            headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+
+        self.bili_tasks[gid]['state'] = 'fetching'
+        if duration:
+            self.bili_tasks[gid]['duration'] = duration
+        else:
+            info_url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
+            try:
+                r_info = requests.get(info_url, headers=headers, timeout=10)
+                info_data = r_info.json().get('data', {})
+                self.bili_tasks[gid]['duration'] = info_data.get('duration', 0) or 0
+            except Exception:
+                pass
+
+        playurl = f'https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=120&fnval=16&fourk=1'
+        try:
+            r = requests.get(playurl, headers=headers, timeout=10)
+            stream_data = r.json()
+        except (requests.RequestException, ValueError) as e:
+            self.bili_tasks[gid]['state'] = 'error'
+            self.bili_tasks[gid]['error'] = f"获取视频流失败：{e}"
+            return {"ok": False, "error": self.bili_tasks[gid]['error']}
+        if stream_data.get('code') != 0:
+            self.bili_tasks[gid]['state'] = 'error'
+            self.bili_tasks[gid]['error'] = f"获取视频流失败：{stream_data.get('message', '')}"
+            return {"ok": False, "error": self.bili_tasks[gid]['error']}
+        dash = stream_data['data'].get('dash', {}) or {}
+        video_streams = dash.get('video', []) or []
+        audio_streams = dash.get('audio', []) or []
+        selected_video = None
+        for v in video_streams:
+            if v.get('id') == quality_id and v.get('codecid') == codec_id:
+                selected_video = v; break
+        if not selected_video:
+            for v in video_streams:
+                if v.get('id') == quality_id: selected_video = v; break
+        if not selected_video and video_streams:
+            for v in video_streams:
+                if v.get('codecid') == 7: selected_video = v; break
+            if not selected_video: selected_video = video_streams[0]
+        selected_audio = None
+        if audio_id:
+            for a in audio_streams:
+                if a.get('id') == audio_id: selected_audio = a; break
+        if not selected_audio and audio_streams:
+            selected_audio = max(audio_streams, key=lambda a: a.get('bandwidth', 0))
+        video_url = selected_video.get('baseUrl', '') if selected_video else ''
+        video_backup_urls = selected_video.get('backupUrl', []) if selected_video else []
+        audio_url = selected_audio.get('baseUrl', '') if selected_audio else ''
+        audio_backup_urls = selected_audio.get('backupUrl', []) if selected_audio else []
+        self.bili_tasks[gid].update({
+            '_video_url': video_url,
+            '_audio_url': audio_url,
+            '_video_backup_urls': video_backup_urls,
+            '_audio_backup_urls': audio_backup_urls,
+        })
+        t = threading.Thread(target=self._download_bili_thread,
+                             args=(gid, video_url, audio_url, title,
+                                   video_backup_urls, audio_backup_urls),
+                             daemon=True)
+        t.start()
+        return {"ok": True, "gid": gid, "type": "bilibili"}
+
+    def _run_bili_queue_job(self, job):
+        """Prepare one queued episode and release its concurrency slot on exit."""
+        gid = job['gid']
+        try:
+            self._prepare_bili_dash_download(**job)
+        except Exception as e:
+            if gid in self.bili_tasks:
+                self.bili_tasks[gid]['state'] = 'error'
+                self.bili_tasks[gid]['error'] = str(e)
+
+        # _prepare starts the ffmpeg thread and returns immediately. The slot
+        # remains occupied until this episode reaches a terminal state.
+        while True:
+            if gid not in self.bili_tasks:
+                break
+            state = self.bili_tasks[gid].get('state')
+            if state in ('finished', 'error', 'removed', 'paused'):
+                break
+            time.sleep(0.5)
+
+        with self._bili_queue_cv:
+            self._bili_queue_active.discard(gid)
+            self._bili_queue_cv.notify_all()
+
+    def _bili_queue_worker(self):
+        """Start queued Bilibili DASH downloads up to the configured limit."""
+        while True:
+            job = None
+            with self._bili_queue_cv:
+                while job is None:
+                    limit = max(1, self.max_active)
+                    while self._bili_queue and len(self._bili_queue_active) < limit:
+                        candidate = self._bili_queue.pop(0)
+                        candidate_gid = candidate.get('gid')
+                        if candidate_gid in self.bili_tasks and \
+                                self.bili_tasks[candidate_gid].get('state') == 'queued':
+                            job = candidate
+                            self._bili_queue_active.add(candidate_gid)
+                            break
+
+                    if job is None:
+                        if self._bili_queue or self._bili_queue_active:
+                            self._bili_queue_cv.wait(0.5)
+                        else:
+                            self._bili_queue_cv.wait()
+            if job:
+                threading.Thread(target=self._run_bili_queue_job, args=(job,),
+                                 daemon=True).start()
+
+    def start_bili_download(self, bvid, cid, quality_id, codec_id, audio_id, title,
+                            aid=None, is_legacy=False, duration=0, queued=False):
         """Start a Bilibili download. Returns gid.
         is_legacy=True: use fnval=0 direct mp4 URL (aria2 download, no login needed)
         is_legacy=False: use fnval=16 DASH streams (ffmpeg merge, may need login)
@@ -5439,13 +5686,8 @@ class Engine:
             'added_at': time.time(),
         }
 
-        info_url = f'https://api.bilibili.com/x/web-interface/view?bvid={bvid}'
-        try:
-            r_info = requests.get(info_url, headers=headers, timeout=10)
-            info_data = r_info.json().get('data', {})
-            self.bili_tasks[gid]['duration'] = info_data.get('duration', 0) or 0
-        except Exception:
-            pass
+        if duration:
+            self.bili_tasks[gid]['duration'] = duration
 
         if is_legacy or codec_id == 0:
             # LEGACY: fnval=0 -> direct mp4 URL -> aria2 download
@@ -5482,54 +5724,29 @@ class Engine:
                 return {"ok": False, "error": str(e)}
         else:
             # DASH: fnval=16 -> video+audio merge with ffmpeg
-            playurl = f'https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=120&fnval=16&fourk=1'
-            r = requests.get(playurl, headers=headers, timeout=10)
-            stream_data = r.json()
-            if stream_data.get('code') != 0:
-                self.bili_tasks[gid]['state'] = 'error'
-                self.bili_tasks[gid]['error'] = f"获取视频流失败：{stream_data.get('message', '')}"
-                return {"ok": False, "error": self.bili_tasks[gid]['error']}
-            dash = stream_data['data'].get('dash', {}) or {}
-            video_streams = dash.get('video', []) or []
-            audio_streams = dash.get('audio', []) or []
-            selected_video = None
-            for v in video_streams:
-                if v.get('id') == quality_id and v.get('codecid') == codec_id:
-                    selected_video = v; break
-            if not selected_video:
-                for v in video_streams:
-                    if v.get('id') == quality_id: selected_video = v; break
-            if not selected_video and video_streams:
-                for v in video_streams:
-                    if v.get('codecid') == 7: selected_video = v; break
-                if not selected_video: selected_video = video_streams[0]
-            selected_audio = None
-            if audio_id:
-                for a in audio_streams:
-                    if a.get('id') == audio_id: selected_audio = a; break
-            if not selected_audio and audio_streams:
-                selected_audio = max(audio_streams, key=lambda a: a.get('bandwidth', 0))
-            video_url = selected_video.get('baseUrl', '') if selected_video else ''
-            video_backup_urls = selected_video.get('backupUrl', []) if selected_video else []
-            audio_url = selected_audio.get('baseUrl', '') if selected_audio else ''
-            audio_backup_urls = selected_audio.get('backupUrl', []) if selected_audio else []
-            # Store params for pause/resume support
-            self.bili_tasks[gid].update({
-                '_video_url': video_url,
-                '_audio_url': audio_url,
-                '_video_backup_urls': video_backup_urls,
-                '_audio_backup_urls': audio_backup_urls,
-            })
-            t = threading.Thread(target=self._download_bili_thread,
-                                 args=(gid, video_url, audio_url, title,
-                                       video_backup_urls, audio_backup_urls),
-                                 daemon=True)
-            t.start()
-            return {"ok": True, "gid": gid, "type": "bilibili"}
+            if queued:
+                self.bili_tasks[gid]['state'] = 'queued'
+                job = {
+                    'gid': gid, 'bvid': bvid, 'cid': cid,
+                    'quality_id': quality_id, 'codec_id': codec_id,
+                    'audio_id': audio_id, 'title': title, 'aid': aid,
+                    'duration': duration,
+                }
+                with self._bili_queue_cv:
+                    self._bili_queue.append(job)
+                    self._bili_queue_cv.notify_all()
+                return {"ok": True, "gid": gid, "type": "bilibili", "queued": True}
+            return self._prepare_bili_dash_download(
+                gid, bvid, cid, quality_id, codec_id, audio_id, title,
+                aid=aid, duration=duration,
+            )
 
 
     def stop_bili_download(self, gid, skip_trash=False):
         """Stop a Bilibili download."""
+        with self._bili_queue_cv:
+            self._bili_queue = [job for job in self._bili_queue if job.get('gid') != gid]
+            self._bili_queue_cv.notify_all()
         if gid in self.bili_tasks:
             info = self.bili_tasks[gid]
             proc = info.get('proc')
@@ -5960,6 +6177,8 @@ def api_bili_info():
         result = _extract_bili_video(id_, page=page)
     elif mode == 'bangumi':
         result = _extract_bili_bangumi(id_)
+    elif mode == 'season':
+        result = _extract_bili_season(id_)
     else:
         result = {"ok": False, "error": "暂不支持该链接类型"}
     return jsonify(result)
@@ -5976,11 +6195,56 @@ def api_download_bili():
     quality_id = data.get("quality_id", 32)  # default 480P
     codec_id = data.get("codec_id", 7)  # default H264
     audio_id = data.get("audio_id", 0)  # 0 = auto best
+    duration = data.get("duration", 0)
+    is_legacy = bool(data.get("is_legacy", False))
     if not bvid:
         return jsonify(ok=False, error="缺少B站视频BV号"), 400
     result = engine.start_bili_download(bvid, cid, quality_id, codec_id, audio_id,
-                                        title=title or "B站视频", aid=aid)
+                                        title=title or "B站视频", aid=aid,
+                                        is_legacy=is_legacy, duration=duration)
     return jsonify(result)
+
+
+@app.route("/api/download_bili_batch", methods=["POST"])
+def api_download_bili_batch():
+    """Create tasks for every Bilibili page or bangumi episode."""
+    data = request.get_json(force=True)
+    items = data.get("items", [])
+    quality_id = data.get("quality_id", 32)
+    codec_id = data.get("codec_id", 7)
+    audio_id = data.get("audio_id", 0)
+    is_legacy = bool(data.get("is_legacy", False))
+    if not isinstance(items, list) or not items:
+        return jsonify(ok=False, error="缺少批量下载条目"), 400
+    if len(items) > 500:
+        return jsonify(ok=False, error="单次最多下载500个条目"), 400
+
+    created = 0
+    failures = []
+    for index, item in enumerate(items, 1):
+        bvid = str(item.get("bvid", "") or "").strip()
+        cid = item.get("cid", 0)
+        aid = item.get("aid", 0)
+        title = str(item.get("title", "") or "").strip() or f"B站视频 {index:03d}"
+        duration = item.get("duration", 0) or 0
+        if not bvid or not cid:
+            failures.append({"index": index, "title": title, "error": "缺少BV号或CID"})
+            continue
+        result = engine.start_bili_download(
+            bvid, cid, quality_id, codec_id, audio_id, title,
+            aid=aid, is_legacy=is_legacy, duration=duration,
+            queued=not is_legacy,
+        )
+        if result.get("ok"):
+            created += 1
+        else:
+            failures.append({"index": index, "title": title,
+                             "error": result.get("error", "创建任务失败")})
+
+    if not created:
+        error = failures[0].get("error") if failures else "创建任务失败"
+        return jsonify(ok=False, error=error, created=0, failures=failures), 200
+    return jsonify(ok=True, created=created, failures=failures)
 
 
 @app.route("/api/bili_qr_generate")
