@@ -438,6 +438,26 @@ const fmtTime=s=>{if(s<60)return s+'秒';if(s<3600)return Math.floor(s/60)+'分'
 const fmtETA=(pct,elapsed)=>{if(pct<=0||pct>=100)return'';const total=elapsed/pct*100;const remain=Math.max(0,total-elapsed);if(remain<60)return remain.toFixed(0)+'秒';if(remain<3600)return Math.floor(remain/60)+'分'+Math.round(remain%60)+'秒';const h=Math.floor(remain/3600),m=Math.round((remain%3600)/60);return h+'时'+m+'分'};
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});if(!r.ok)throw new Error('HTTP '+r.status);return await r.json()}catch(e){console.error('POST '+u+' failed:',e);return{ok:false,error:'请求失败: '+e.message}}}
 function esc(s){return (s||'').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}
+async function copyText(text){
+  if(!text)return false;
+  try{
+    await navigator.clipboard.writeText(text);
+    return true;
+  }catch(e){}
+  try{
+    const area=document.createElement('textarea');
+    area.value=text;
+    area.style.position='fixed';
+    area.style.left='-9999px';
+    document.body.appendChild(area);
+    area.select();
+    const ok=document.execCommand('copy');
+    area.remove();
+    return ok;
+  }catch(e){
+    return false;
+  }
+}
 
 
 // in-app confirm/alert dialogs (avoids native OS dialog with Python icon)
@@ -2102,11 +2122,22 @@ function renderTask(t){
     html+='<button class="btn sm go" data-act="retry" data-g="'+t.gid+'">重试</button>';
   }
   if(!liveRecording)html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">删除</button>';
+  if(t.url)html+='<button class="btn sm" data-act="copyUrl" data-g="'+t.gid+'" title="'+esc(t.url)+'">🔗</button>';
   html+='<button class="btn sm" data-act="openDir" data-g="'+t.gid+'" title="'+esc(t.dir||'')+'">📂</button></div>';
   el.innerHTML=html;
   el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
   el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
   el.querySelector('[data-act=retry]')?.addEventListener('click',async()=>{const r=await post('/api/retry',{gid:t.gid});if(r&&r.ok){poll();}else if(r&&r.error){await customAlert('重试失败: '+r.error);}});
+  el.querySelector('[data-act=copyUrl]')?.addEventListener('click',async()=>{
+    const ok=await copyText(t.url);
+    const btn=el.querySelector('[data-act=copyUrl]');
+    if(btn){
+      const old=btn.textContent;
+      btn.textContent=ok?'✓':'!';
+      setTimeout(()=>{btn.textContent=old},1200);
+    }
+    if(!ok)await customAlert('复制链接失败',{title:'下载链接'});
+  });
   el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{
     const message=liveRecording?'停止录制？已录制部分会保留并移入下载记录。':'删除此任务？将移至回收站。';
     if(await customConfirm(message,{title:liveRecording?'停止录制':'删除任务',okText:liveRecording?'停止录制':'删除',danger:true}))await post('/api/stop',{gid:t.gid})

@@ -226,6 +226,7 @@ class DownloadTask:
     received: int = 0
     error: str | None = None
     output: str | None = None
+    url: str = ""
     started: float = field(default_factory=time.time)
     finished: float | None = None
     stop_requested: bool = False
@@ -347,6 +348,7 @@ class DownloadManager:
         url = self.owner._variant_url(
             str(media.get("url") or "") + str(media.get("urlToken") or ""), suffix
         )
+        task.url = url
         threading.Thread(target=self._run, args=(task, url), daemon=True).start()
         return task
 

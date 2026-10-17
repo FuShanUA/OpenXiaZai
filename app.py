@@ -3774,6 +3774,7 @@ class Engine:
             "file_key": file_key,
             "quality": quality,
             "title": title,
+            "url": task.get("url") or "",
             "state": task.get("state", "queued"),
             "progress": task.get("percent") or 0,
             "size": task.get("total") or 0,
@@ -3811,6 +3812,7 @@ class Engine:
                     "completed_size": task.get("received") or 0,
                     "download_rate": task.get("speed") or 0,
                     "output": task.get("output") or info.get("output") or "",
+                    "url": task.get("url") or info.get("url") or "",
                     "error": task.get("error") or "",
                 })
             raw_state = info.get("state")
