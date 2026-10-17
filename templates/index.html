@@ -141,6 +141,16 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 .wx-task .bar{margin-top:6px}
 .wx-empty{color:var(--muted);font-size:13px;padding:18px 0;text-align:center}
 .wx-note{font-size:12px;color:var(--warn);line-height:1.6;padding:10px 0}
+.wx-live{border:1px solid var(--border);background:var(--panel2);border-radius:10px;padding:12px;margin:12px 0}
+.wx-live-head{display:flex;align-items:center;gap:10px}
+.wx-live-title{flex:1;min-width:0;font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wx-live-video{width:100%;aspect-ratio:16/9;max-height:260px;background:#000;border-radius:8px;margin-top:10px}
+.wx-live-actions{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.wx-live-meta{font-size:11px;color:var(--muted);margin-top:8px;word-break:break-all}
+.wx-live-state{font-size:11px;color:var(--accent2)}
+.wx-live-state.recording{color:var(--danger)}
+.wx-live-state.done{color:var(--accent2)}
+.wx-live-state.failed{color:var(--danger)}
 /* file picker */
 .picker-toolbar{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
 .picker-filter{display:flex;gap:2px;flex-wrap:wrap}
@@ -388,6 +398,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
       </div>
       <div class="wx-note" id="wxNotice" style="display:none"></div>
       <div class="wx-list" id="wxVideos"></div>
+      <div id="wxLives"></div>
       <div id="wxTasks"></div>
     </div>
     <div class="modal-foot" style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
@@ -813,6 +824,57 @@ function wxQualityOptions(video){
   });
   return html;
 }
+function wxLiveState(task){
+  if(!task)return '待录制';
+  return {queued:'准备录制',recording:'录制中',stopping:'正在停止',done:'已录制',failed:'录制失败'}[task.state]||task.state;
+}
+function wxLiveProgress(task){
+  if(!task)return '';
+  if(task.state==='failed')return '失败：'+(task.error||'未知原因');
+  if(task.state==='done')return '已完成 · '+(task.output||'');
+  if(task.state==='recording')return [
+    task.duration_human||'',
+    task.received_human||fmtB(task.received),
+    task.speed?fmtR(task.speed):''
+  ].filter(Boolean).join(' · ');
+  if(task.state==='stopping')return '正在停止，请稍候';
+  if(task.state==='queued')return '等待开始';
+  return '';
+}
+function wxLivePreviewSrc(data,live){
+  const port=data.capture_port||8765;
+  return 'http://127.0.0.1:'+port+'/api/lives/'+encodeURIComponent(live.live_id)+'/preview/index.m3u8';
+}
+function wxRenderLives(data){
+  const box=$('wxLives');
+  const lives=Array.isArray(data.lives)?data.lives:[];
+  const ffmpegReady=!!(data.dependencies||{}).ffmpeg;
+  if(!lives.length){
+    box.innerHTML='<div class="wx-empty">'+esc(data.running?'正在等待微信视频号直播进入捕获链路':'暂无直播捕获')+'</div>';
+    return;
+  }
+  const current=lives.find(live=>live.is_current)||lives[0];
+  const task=current.task;
+  const state=wxLiveState(task);
+  const active=task&&['queued','recording','stopping'].includes(task.state);
+  const title=current.title||current.author||('直播 '+String(current.live_id||'').slice(0,10));
+  const meta=[
+    current.author||'',
+    current.start_time?new Date(current.start_time*1000).toLocaleString():'',
+    current.url?'':'直播地址已过期'
+  ].filter(Boolean).join(' · ');
+  box.innerHTML='<div class="wx-live" data-live-id="'+esc(current.live_id)+'">'+
+    '<div class="wx-live-head"><div class="wx-live-title">'+esc(title)+'</div><span class="wx-live-state '+(active?'recording':task?.state==='failed'?'failed':'done')+'">'+esc(state)+'</span></div>'+
+    '<video class="wx-live-video" controls autoplay muted playsinline preload="metadata"'+(ffmpegReady?' src="'+esc(wxLivePreviewSrc(data,current))+'"':'')+ '></video>'+
+    '<div class="wx-live-actions">'+
+      '<button class="btn sm go wx-live-record"'+(active||!current.url||!ffmpegReady?' disabled':'')+'>开始录制</button>'+
+      '<button class="btn sm danger wx-live-stop"'+(!active?' disabled':'')+'>停止录制</button>'+
+    '</div>'+
+    '<div class="wx-live-meta">'+esc(meta||'微信视频号直播')+'</div>'+
+    (ffmpegReady?'':'<div class="wx-note">未找到 ffmpeg，无法预览或录制直播。请先安装 ffmpeg。</div>')+
+    '<div class="wx-task-meta">'+esc(wxLiveProgress(task))+'</div>'+
+    '</div>';
+}
 function renderWechatMac(data){
   const deps=data.dependencies||{};
   const running=!!data.running;
@@ -820,6 +882,7 @@ function renderWechatMac(data){
   const counters=capture.counters||{};
   const session=capture.session||{};
   const videos=Array.isArray(data.videos)?data.videos:[];
+  wxRenderLives(data);
   const tasks=Array.isArray(data.tasks)?data.tasks:[];
   const activeTasks=tasks.filter(task=>['queued','downloading','decrypting'].includes(task.state));
   const status=$('wxStatus');
@@ -828,7 +891,7 @@ function renderWechatMac(data){
   state.textContent=running?'捕获运行中 · 代理 127.0.0.1:'+(data.proxy_port||9090):'捕获未运行';
   state.style.color=running?'var(--accent2)':'var(--muted)';
   status.appendChild(state);
-  [['mitmproxy',deps.mitmdump],['Node.js',deps.node],['解密组件',deps.wasm],['证书',deps.cert_installed]].forEach(([name,ok])=>{
+  [['mitmproxy',deps.mitmdump],['Node.js',deps.node],['ffmpeg',deps.ffmpeg],['解密组件',deps.wasm],['证书',deps.cert_installed]].forEach(([name,ok])=>{
     const pill=document.createElement('span');
     pill.className='badge '+(ok?'wechat_video':'unsup');
     pill.textContent=name+(ok?'':'缺失');
@@ -847,6 +910,8 @@ function renderWechatMac(data){
     phaseText='系统代理尚未确认，代理看护会自动恢复；已等待 '+wxElapsedText(elapsed);
   }else if(!injected){
     phaseText='代理已生效，等待微信视频号页面加载；请打开或刷新回放，已等待 '+wxElapsedText(elapsed);
+  }else if(Array.isArray(data.lives)&&data.lives.length){
+    phaseText='已捕获视频号直播，可在下方预览并录制';
   }else if(!videos.length){
     phaseText='页面注入已生效，等待回放产生媒体记录；已等待 '+wxElapsedText(elapsed);
   }else if(activeTasks.length){
@@ -996,6 +1061,22 @@ $('wxVideos').addEventListener('click',async e=>{
   const res=await post('/api/wechat_mac/download',{file_key:fileKey,quality});
   btn.disabled=false;btn.textContent='下载';
   if(!res||res.ok===false){await customAlert(res?.error||'下载启动失败',{title:'微信视频号下载'})}
+  refreshWechatMac();
+});
+$('wxLives').addEventListener('click',async e=>{
+  const recordBtn=e.target.closest('.wx-live-record');
+  const stopBtn=e.target.closest('.wx-live-stop');
+  if(!recordBtn&&!stopBtn)return;
+  const item=(recordBtn||stopBtn).closest('.wx-live');
+  const liveId=item?.dataset.liveId;
+  if(!liveId)return;
+  const btn=recordBtn||stopBtn;
+  btn.disabled=true;
+  btn.textContent=recordBtn?'启动中…':'停止中…';
+  const res=await post('/api/wechat_mac/'+(recordBtn?'live_record':'live_stop'),{live_id:liveId});
+  btn.disabled=false;
+  btn.textContent=recordBtn?'开始录制':'停止录制';
+  if(!res||res.ok===false){await customAlert(res?.error||'操作失败',{title:'微信视频号直播'})}
   refreshWechatMac();
 });
 

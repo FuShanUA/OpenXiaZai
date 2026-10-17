@@ -22,6 +22,49 @@ if sys.platform == "win32" and sys.stdout is None:
 import webview
 from app import app, engine, DEFAULT_SAVE, _wechat_mac_capture
 
+
+def allow_autoplay_in_wkwebview():
+    """Allow muted live previews to start without a user gesture."""
+    try:
+        from webview.platforms import cocoa
+        original_webkit = cocoa.WebKit
+        original_configuration = original_webkit.WKWebViewConfiguration
+
+        class ConfigurationBuilder:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+            def init(self):
+                return self.configuration
+
+        class AutoplayConfiguration:
+            @classmethod
+            def alloc(cls):
+                configuration = original_configuration.alloc().init()
+                configuration.setMediaTypesRequiringUserActionForPlayback_(0)
+                return ConfigurationBuilder(configuration)
+
+        class WebKitProxy:
+            def __init__(self, original):
+                self.original = original
+                self.WKWebViewConfiguration = AutoplayConfiguration
+
+            def __getattr__(self, name):
+                return getattr(self.original, name)
+
+        original_init = cocoa.BrowserView.__init__
+
+        def autoplay_init(self, window):
+            cocoa.WebKit = WebKitProxy(original_webkit)
+            try:
+                original_init(self, window)
+            finally:
+                cocoa.WebKit = original_webkit
+
+        cocoa.BrowserView.__init__ = autoplay_init
+    except Exception:
+        pass
+
 # Capture any uncaught exceptions so the window doesn't silently vanish
 import faulthandler, traceback as _tb
 faulthandler.enable()
@@ -97,6 +140,7 @@ def main():
     if not _wait_ready():
         print("后端启动失败,请检查 aria2c 是否已安装。")
         return
+    allow_autoplay_in_wkwebview()
     webview.create_window(
         "OpenXiaZai",
         f"http://127.0.0.1:{PORT}/",

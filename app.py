@@ -6134,12 +6134,15 @@ class WeChatMacCapture:
     def _dependencies(self):
         mitmdump = self._mitmdump_path()
         node = _find_binary("node")
+        ffmpeg = _find_binary("ffmpeg")
         cert_path = self._cert_path()
         return {
             "mitmdump": bool(mitmdump and os.path.isfile(mitmdump)),
             "mitmdump_path": mitmdump or "",
             "node": bool(node and os.path.isfile(node)),
             "node_path": node or "",
+            "ffmpeg": bool(ffmpeg and os.path.isfile(ffmpeg)),
+            "ffmpeg_path": ffmpeg or "",
             "wasm": self._wasm_ready(),
             "wasm_dir": WECHAT_WASM_DIR,
             "cert_file": os.path.isfile(cert_path),
@@ -6185,6 +6188,8 @@ class WeChatMacCapture:
             data["videos"] = videos.get("videos", [])
             tasks = self._capture_api("/api/tasks")
             data["tasks"] = tasks.get("tasks", [])
+            lives = self._capture_api("/api/lives")
+            data["lives"] = lives.get("lives", [])
         except Exception as e:
             data["capture_error"] = "捕获服务尚未就绪：%s" % e
         return data
@@ -6265,6 +6270,7 @@ class WeChatMacCapture:
                 "WX_AUTO_FETCH": "0",
                 "WX_AUTO_DECRYPT": "1",
                 "WX_NODE_PATH": deps["node_path"],
+                "WX_FFMPEG_PATH": _FFMPEG,
                 "WX_CAPTURE_HOST": "127.0.0.1",
                 "WX_CAPTURE_PORT": str(WECHAT_CAPTURE_PORT),
                 "WX_PROXY_PORT": str(WECHAT_PROXY_PORT),
@@ -6391,6 +6397,46 @@ class WeChatMacCapture:
             return payload
         except Exception as e:
             return {"ok": False, "error": "启动微信视频下载失败：%s" % e}
+
+    def live_record(self, live_id):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+        if not running:
+            return {"ok": False, "error": "捕获服务未运行"}
+        url = self._api_url("/api/lives/%s/record" % quote(live_id, safe=""))
+        try:
+            response = self.http.post(url, json={}, timeout=8)
+            payload = response.json()
+            response.raise_for_status()
+            return payload
+        except Exception as e:
+            return {"ok": False, "error": "启动微信直播录制失败：%s" % e}
+
+    def live_stop(self, live_id):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+        if not running:
+            return {"ok": False, "error": "捕获服务未运行"}
+        url = self._api_url("/api/lives/%s/stop" % quote(live_id, safe=""))
+        try:
+            response = self.http.post(url, json={}, timeout=8)
+            payload = response.json()
+            response.raise_for_status()
+            return payload
+        except Exception as e:
+            return {"ok": False, "error": "停止微信直播录制失败：%s" % e}
+
+    def live_preview_url(self, live_id):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+        if not running:
+            return {"ok": False, "error": "捕获服务未运行"}
+        return {
+            "ok": True,
+            "url": self._api_url(
+                "/api/lives/%s/preview/index.m3u8" % quote(live_id, safe="")
+            ),
+        }
 
 
 _wechat_mac_capture = WeChatMacCapture()
@@ -6685,6 +6731,39 @@ def api_wechat_mac_download():
     if not file_key:
         return jsonify(ok=False, error="缺少视频标识"), 400
     return jsonify(_wechat_mac_capture.download(file_key, quality))
+
+
+@app.route("/api/wechat_mac/live_record", methods=["POST"])
+def api_wechat_mac_live_record():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    data = request.get_json(force=True)
+    live_id = str(data.get("live_id", "")).strip()
+    if not live_id:
+        return jsonify(ok=False, error="缺少直播标识"), 400
+    return jsonify(_wechat_mac_capture.live_record(live_id))
+
+
+@app.route("/api/wechat_mac/live_stop", methods=["POST"])
+def api_wechat_mac_live_stop():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    data = request.get_json(force=True)
+    live_id = str(data.get("live_id", "")).strip()
+    if not live_id:
+        return jsonify(ok=False, error="缺少直播标识"), 400
+    return jsonify(_wechat_mac_capture.live_stop(live_id))
+
+
+@app.route("/api/wechat_mac/live_preview", methods=["POST"])
+def api_wechat_mac_live_preview():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    data = request.get_json(force=True)
+    live_id = str(data.get("live_id", "")).strip()
+    if not live_id:
+        return jsonify(ok=False, error="缺少直播标识"), 400
+    return jsonify(_wechat_mac_capture.live_preview_url(live_id))
 
 
 @app.route("/api/download_m3u8", methods=["POST"])
