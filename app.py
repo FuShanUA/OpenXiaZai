@@ -2999,6 +2999,8 @@ class Engine:
         self._bili_queue_active = set()
         self.cf_tasks = {}      # gid -> Cloudflare browser downloads
         self._cf_counter = 0
+        self.wechat_tasks = {}  # gid -> WeChat capture download task
+        self._wechat_counter = 0
         self._format_m3u8_map = {}  # (url, format_id) -> direct video URL
         threading.Thread(target=self._bili_queue_worker, daemon=True).start()
 
@@ -3757,7 +3759,110 @@ class Engine:
             self._save_records()
         info['state'] = 'removed'
 
+    def start_wechat_capture_download(self, file_key, quality, title="微信视频号视频"):
+        result = _wechat_mac_capture.download(file_key, quality)
+        if not result.get("ok"):
+            return result
+        task = result.get("task") or {}
+        inner_id = str(task.get("id") or "")
+        if not inner_id:
+            return {"ok": False, "error": "捕获服务未返回任务 ID"}
+        self._wechat_counter += 1
+        gid = "wx_%d" % self._wechat_counter
+        self.wechat_tasks[gid] = {
+            "inner_id": inner_id,
+            "file_key": file_key,
+            "quality": quality,
+            "title": title,
+            "state": task.get("state", "queued"),
+            "progress": task.get("percent") or 0,
+            "size": task.get("total") or 0,
+            "completed_size": task.get("received") or 0,
+            "download_rate": task.get("speed") or 0,
+            "output": task.get("output") or "",
+            "error": task.get("error") or "",
+            "added_at": time.time(),
+        }
+        return {"ok": True, "gid": gid, "type": "wechat_capture"}
+
+    def stop_wechat_capture_download(self, gid):
+        info = self.wechat_tasks.get(gid)
+        if not info:
+            return False
+        _wechat_mac_capture.stop_download(info.get("inner_id", ""))
+        self.wechat_tasks.pop(gid, None)
+        return True
+
+    def _merge_wechat_tasks(self, items, existing):
+        if not self.wechat_tasks:
+            return
+        statuses = {
+            str(task.get("id")): task
+            for task in _wechat_mac_capture.task_statuses()
+        }
+        for gid in list(self.wechat_tasks.keys()):
+            info = self.wechat_tasks[gid]
+            task = statuses.get(info.get("inner_id"))
+            if task:
+                info.update({
+                    "state": task.get("state", info.get("state")),
+                    "progress": task.get("percent") or 0,
+                    "size": task.get("total") or 0,
+                    "completed_size": task.get("received") or 0,
+                    "download_rate": task.get("speed") or 0,
+                    "output": task.get("output") or info.get("output") or "",
+                    "error": task.get("error") or "",
+                })
+            raw_state = info.get("state")
+            state = {
+                "queued": "queued",
+                "downloading": "downloading",
+                "decrypting": "fetching",
+                "done": "finished",
+                "failed": "error",
+            }.get(raw_state, "downloading")
+            output = info.get("output") or ""
+            if state == "finished":
+                if gid not in existing:
+                    existing.add(gid)
+                    self.records["history"].insert(0, {
+                        "gid": gid,
+                        "type": "wechat_capture",
+                        "name": info.get("title", "微信视频号视频"),
+                        "url": info.get("file_key", ""),
+                        "dir": os.path.dirname(output) if output else self.save_path,
+                        "paths": [output] if output else [],
+                        "size": info.get("size", 0),
+                        "completed_at": int(time.time()),
+                    })
+                    self._save_records()
+                self.wechat_tasks.pop(gid, None)
+                continue
+            items.append({
+                "gid": gid,
+                "type": "wechat_capture",
+                "name": info.get("title", "微信视频号视频"),
+                "state": state,
+                "progress": info.get("progress", 0),
+                "size": info.get("size", 0),
+                "completed_size": info.get("completed_size", 0),
+                "download_rate": info.get("download_rate", 0),
+                "upload_rate": 0,
+                "peers": 0,
+                "seeds": 0,
+                "dir": os.path.dirname(output) if output else self.save_path,
+                "files": [],
+                "paths": [output] if output else [],
+                "url": info.get("file_key", ""),
+                "has_metadata": True,
+                "metadata_progress": 0,
+                "added_at": info.get("added_at", 0),
+                "error": info.get("error", ""),
+            })
+
     def stop(self, gid, skip_trash=False):
+        if gid.startswith("wx_"):
+            return self.stop_wechat_capture_download(gid)
         info = self.tasks.get(gid)
         real_gid = info.get("converted_to", gid) if info else gid
         if not skip_trash:
@@ -4001,6 +4106,7 @@ class Engine:
                 "added_at": info.get('added_at', 0),
             })
         # 合并 yt-dlp 下载任务
+        self._merge_wechat_tasks(items, existing)
         for gid, info in list(self.yt_tasks.items()):
             if info.get('state') == 'removed':
                 continue
@@ -6082,6 +6188,8 @@ class WeChatMacCapture:
         self.http = requests.Session()
         self.http.trust_env = False
         self.lock = threading.Lock()
+        self.auto_stop_when_idle = False
+        self.auto_stop_thread = None
 
     @staticmethod
     def _mitmdump_path():
@@ -6158,6 +6266,11 @@ class WeChatMacCapture:
         response.raise_for_status()
         return response.json()
 
+    def _capture_post(self, path, payload=None):
+        response = self.http.post(self._api_url(path), json=payload or {}, timeout=8)
+        response.raise_for_status()
+        return response.json()
+
     def _log_tail(self, limit=1200):
         try:
             with open(self.log_path, "r", encoding="utf-8", errors="replace") as handle:
@@ -6193,6 +6306,64 @@ class WeChatMacCapture:
         except Exception as e:
             data["capture_error"] = "捕获服务尚未就绪：%s" % e
         return data
+
+    def task_statuses(self):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+        if not running:
+            return []
+        try:
+            payload = self._capture_api("/api/tasks")
+            return payload.get("tasks", [])
+        except Exception:
+            return []
+
+    def stop_download(self, task_id):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+        if not running:
+            return {"ok": False, "error": "捕获服务未运行"}
+        try:
+            return self._capture_post(
+                "/api/tasks/%s/stop" % quote(task_id, safe="")
+            )
+        except Exception as e:
+            return {"ok": False, "error": "停止微信视频下载失败：%s" % e}
+
+    def set_auto_stop_when_idle(self, enabled=True):
+        with self.lock:
+            self.auto_stop_when_idle = bool(enabled)
+            should_start = self.auto_stop_when_idle and self.auto_stop_thread is None
+        if should_start:
+            self.auto_stop_thread = threading.Thread(
+                target=self._auto_stop_worker, daemon=True
+            )
+            self.auto_stop_thread.start()
+        return {"ok": True, "auto_stop_when_idle": bool(enabled)}
+
+    def _auto_stop_worker(self):
+        while True:
+            time.sleep(1)
+            with self.lock:
+                enabled = self.auto_stop_when_idle
+                running = self.proc is not None and self.proc.poll() is None
+            if not enabled:
+                with self.lock:
+                    self.auto_stop_thread = None
+                return
+            if not running:
+                continue
+            tasks = self.task_statuses()
+            active = any(
+                task.get("state") in {"queued", "downloading", "decrypting"}
+                for task in tasks
+            )
+            if not active:
+                self.stop()
+                with self.lock:
+                    self.auto_stop_when_idle = False
+                    self.auto_stop_thread = None
+                return
 
     def prepare(self):
         node = _find_binary("node")
@@ -6242,6 +6413,7 @@ class WeChatMacCapture:
 
     def start(self):
         with self.lock:
+            self.auto_stop_when_idle = False
             if self.proc is not None and self.proc.poll() is None:
                 return {"ok": True, "already_running": True}
 
@@ -6319,6 +6491,7 @@ class WeChatMacCapture:
 
     def stop(self):
         with self.lock:
+            self.auto_stop_when_idle = False
             proc = self.proc
             self.proc = None
             self.started_at = None
@@ -6730,7 +6903,15 @@ def api_wechat_mac_download():
     quality = str(data.get("quality", "best")).strip() or "best"
     if not file_key:
         return jsonify(ok=False, error="缺少视频标识"), 400
-    return jsonify(_wechat_mac_capture.download(file_key, quality))
+    title = str(data.get("title", "")).strip() or "微信视频号视频"
+    return jsonify(engine.start_wechat_capture_download(file_key, quality, title))
+
+
+@app.route("/api/wechat_mac/auto_stop", methods=["POST"])
+def api_wechat_mac_auto_stop():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.set_auto_stop_when_idle(True))
 
 
 @app.route("/api/wechat_mac/live_record", methods=["POST"])

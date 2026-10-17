@@ -228,6 +228,7 @@ class DownloadTask:
     output: str | None = None
     started: float = field(default_factory=time.time)
     finished: float | None = None
+    stop_requested: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -268,6 +269,18 @@ class DownloadManager:
     def get(self, task_id: str) -> DownloadTask | None:
         with self.lock:
             return self.tasks.get(task_id)
+
+    def stop(self, task_id: str) -> DownloadTask | None:
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                return None
+            task.stop_requested = True
+            if task.state in {"queued", "downloading", "decrypting"}:
+                task.state = "failed"
+                task.error = "已停止"
+                task.finished = time.time()
+            return task
 
     def for_file(self, file_key: str) -> list[dict[str, Any]]:
         with self.lock:
@@ -385,6 +398,8 @@ class DownloadManager:
                 with self.lock:
                     task.total = int(length)
             while True:
+                if task.stop_requested:
+                    raise RuntimeError("下载已停止")
                 chunk = response.read(CHUNK)
                 if not chunk:
                     break

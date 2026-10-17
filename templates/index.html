@@ -46,6 +46,7 @@ input[type=text]:focus{border-color:var(--accent)}
 .badge.yt_media{color:#ff5c5c}
 .badge.loom{color:#625df5}
 .badge.wechat_video{color:#07c160}
+.badge.wechat_capture{color:#07c160}
 .badge.bilibili{color:#00a1d6}
 .badge.weibo{color:#ff5722}
 .badge.douyin{color:#ccc}
@@ -426,7 +427,7 @@ window.onerror=function(msg,url,line,col,err){
 <script>
 const $=id=>document.getElementById(id);
 const IS_MACOS={{ 'true' if is_macos else 'false' }};
-const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",vimeo:"Vimeo 视频",loom:"Loom 视频",wechat_video:"微信视频号",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",douyin_live:"抖音直播",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",vimeo:"Vimeo 视频",loom:"Loom 视频",wechat_video:"微信视频号",wechat_capture:"微信视频号",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",douyin_live:"抖音直播",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
 const UNSUP={quark:1,cloud:1};
 let activeTab='tasks';
 let cur=null;
@@ -792,12 +793,19 @@ function wxClearBusyButton(btn,label){
 }
 function openWechatMacModal(){
   $('wechatMacOverlay').style.display='flex';
+  post('/api/wechat_mac/start',{}).then(res=>{
+    if(!res||res.ok===false){
+      $('wxNotice').style.display='block';
+      $('wxNotice').textContent=res?.error||'捕获服务启动失败';
+    }
+  });
   refreshWechatMac();
   if(wxMacTimer)clearInterval(wxMacTimer);
   wxMacTimer=setInterval(refreshWechatMac,2000);
 }
 function closeWechatMacModal(){
   $('wechatMacOverlay').style.display='none';
+  post('/api/wechat_mac/auto_stop',{});
   if(wxMacTimer){clearInterval(wxMacTimer);wxMacTimer=null}
 }
 async function refreshWechatMac(){
@@ -954,7 +962,7 @@ function renderWechatMac(data){
         '<div class="title">'+esc(title)+'</div>'+
         '<div class="meta">'+esc(meta||'微信视频号')+'</div>'+
         '<div class="actions"><select class="wx-quality">'+wxQualityOptions(video)+'</select>'+
-        '<button class="btn sm go wx-download"'+(expired?' disabled':'')+'>下载</button></div>'+
+        '<button class="btn sm go wx-download"'+(expired?' disabled':'')+'>添加下载</button></div>'+
         '</div>';
     }).join('');
   }
@@ -1058,10 +1066,15 @@ $('wxVideos').addEventListener('click',async e=>{
   const quality=item?.querySelector('.wx-quality')?.value||'best';
   if(!fileKey)return;
   btn.disabled=true;btn.textContent='启动中…';
-  const res=await post('/api/wechat_mac/download',{file_key:fileKey,quality});
-  btn.disabled=false;btn.textContent='下载';
+  const title=item?.querySelector('.title')?.textContent||'微信视频号视频';
+  const res=await post('/api/wechat_mac/download',{file_key:fileKey,quality,title});
+  btn.disabled=false;btn.textContent='添加下载';
   if(!res||res.ok===false){await customAlert(res?.error||'下载启动失败',{title:'微信视频号下载'})}
-  refreshWechatMac();
+  else{
+    closeWechatMacModal();
+    switchTab('tasks');
+    poll();
+  }
 });
 $('wxLives').addEventListener('click',async e=>{
   const recordBtn=e.target.closest('.wx-live-record');
@@ -2070,8 +2083,11 @@ function renderTask(t){
   }
   html+='<div class="row" style="margin-top:10px">';
   const liveRecording=t.is_live&&(t.state==='downloading'||t.state==='fetching'||t.state==='queued');
+  const wechatCapture=t.type==='wechat_capture';
  if(t.state==='downloading'||t.state==='fetching'||t.state==='queued'){
     if(t.gid&&t.gid.startsWith('cf_')){
+     html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止</button>';
+   }else if(wechatCapture){
      html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止</button>';
    }else if(liveRecording){
      html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止录制</button>';
@@ -2079,10 +2095,10 @@ function renderTask(t){
      html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
    }
  }
-  if(t.state==='paused'){
+  if(t.state==='paused'&&!wechatCapture){
     html+='<button class="btn sm go" data-act="resume" data-g="'+t.gid+'">开始</button>';
   }
-  if(t.state==='error'){
+  if(t.state==='error'&&!wechatCapture){
     html+='<button class="btn sm go" data-act="retry" data-g="'+t.gid+'">重试</button>';
   }
   if(!liveRecording)html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">删除</button>';

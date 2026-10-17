@@ -289,6 +289,11 @@ class Router:
                     return self.live_preview_segment(live_id, action[len("preview/"):])
 
         if method == "POST":
+            match_task = self._task_route(route)
+            if match_task:
+                task_id, action = match_task
+                if action == "stop":
+                    return self.stop_download(task_id)
             match = self._video_route(route)
             if match:
                 file_key, action = match
@@ -332,6 +337,17 @@ class Router:
         live_id = unquote(parts[0])
         action = parts[1] if len(parts) > 1 else ""
         return (live_id, action) if live_id else None
+
+    @staticmethod
+    def _task_route(route: str) -> tuple[str, str] | None:
+        prefix = "/api/tasks/"
+        if not route.startswith(prefix):
+            return None
+        rest = route[len(prefix):]
+        parts = rest.split("/", 1)
+        task_id = unquote(parts[0])
+        action = parts[1] if len(parts) > 1 else ""
+        return (task_id, action) if task_id else None
 
     @staticmethod
     def _live_recording_route(route: str) -> tuple[str, str] | None:
@@ -729,6 +745,12 @@ class Router:
         task = self.live.stop(live_id)
         if task is None:
             return Response.error(404, "no active recording for this live stream")
+        return Response.json({"ok": True, "task": task.as_dict()})
+
+    def stop_download(self, task_id: str) -> Response:
+        task = self.downloads.stop(task_id)
+        if task is None:
+            return Response.error(404, "download task not found")
         return Response.json({"ok": True, "task": task.as_dict()})
 
     def set_service(self, body: bytes) -> Response:
