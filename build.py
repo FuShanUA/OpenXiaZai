@@ -40,6 +40,9 @@ def find_binary(name):
     local = os.path.join(ROOT, name)
     if os.path.exists(local):
         return local
+    interpreter_sibling = os.path.join(os.path.dirname(sys.executable), name)
+    if os.path.isfile(interpreter_sibling) and os.access(interpreter_sibling, os.X_OK):
+        return interpreter_sibling
     p = shutil.which(name)
     if p:
         return p
@@ -75,11 +78,28 @@ def build_mac():
 
     aria2 = find_binary("aria2c")
     ffmpeg = find_binary("ffmpeg")
+    ffprobe = find_binary("ffprobe")
+    node = find_binary("node")
+    mitmdump = find_binary("mitmdump")
     if not aria2:
         print("错误: 未找到 aria2c，请先 brew install aria2")
         sys.exit(1)
     if not ffmpeg:
         print("警告: 未找到 ffmpeg，m3u8 下载将不可用")
+    if not ffprobe:
+        print("警告: 未找到 ffprobe，yt-dlp 元数据处理可能受限")
+    if not node:
+        print("警告: 未找到 node，macOS 微信视频号解密不可用")
+    if not mitmdump:
+        print("警告: 未找到 mitmdump，macOS 微信视频号捕获不可用")
+    if not node or not mitmdump:
+        print("提示: .app 不内置 Node.js 和 mitmdump；如需 macOS 视频号捕获，请运行 brew install node mitmproxy")
+
+    bundled_binaries = [f"('{aria2}', '.')"]
+    if ffmpeg:
+        bundled_binaries.append(f"('{ffmpeg}', '.')")
+    if ffprobe:
+        bundled_binaries.append(f"('{ffprobe}', '.')")
 
     clean()
 
@@ -91,13 +111,14 @@ from PyInstaller.utils.hooks import collect_data_files
 a = Analysis(
     ['{os.path.join(ROOT, "launcher.py")}'],
     pathex=['{ROOT}'],
-    binaries=[{f"('{aria2}', '.')"},{f"('{ffmpeg}', '.')" if ffmpeg else ""}],
+    binaries=[{", ".join(bundled_binaries)}],
     datas=[
         ('{os.path.join(ROOT, "templates")}', 'templates'),
         ('{os.path.join(ROOT, "static")}', 'static'),
         ('{os.path.join(ROOT, "grab_stream.py")}', '.'),
+        ('{os.path.join(ROOT, "wechat_capture")}', 'wechat_capture'),
     ],
-    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
+    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools', 'wechat_finder'],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],
@@ -232,6 +253,7 @@ def build_win():
 
     aria2 = find_binary("aria2c.exe") or find_binary("aria2c")
     ffmpeg = find_binary("ffmpeg.exe") or find_binary("ffmpeg")
+    ffprobe = find_binary("ffprobe.exe") or find_binary("ffprobe")
     if not aria2 and sys.platform == "win32":
         aria2 = _download_aria2c()
     if not ffmpeg and sys.platform == "win32":
@@ -242,6 +264,8 @@ def build_win():
         sys.exit(1)
     if not ffmpeg:
         print("警告: 未找到 ffmpeg.exe，m3u8 下载将不可用")
+    if not ffprobe:
+        print("警告: 未找到 ffprobe.exe，yt-dlp 元数据处理可能受限")
 
     clean()
 
@@ -253,10 +277,13 @@ def build_win():
     _icon = ICON_WIN.replace("\\", "/")
     _aria2 = aria2.replace("\\", "/")
     _ffmpeg = ffmpeg.replace("\\", "/") if ffmpeg else None
+    _ffprobe = ffprobe.replace("\\", "/") if ffprobe else None
 
     binaries = [f"('{_aria2}', '.')"]
     if _ffmpeg:
         binaries.append(f"('{_ffmpeg}', '.')")
+    if _ffprobe:
+        binaries.append(f"('{_ffprobe}', '.')")
 
     spec = f"""# -*- mode: python ; coding: utf-8 -*-
 import os, sys
@@ -269,7 +296,7 @@ a = Analysis(
         ('{_templates}', 'templates'),
         ('{_static}', 'static'),
     ],
-    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools'],
+    hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools', 'wechat_finder'],
     hookspath=[],
     hooksconfig={{}},
     runtime_hooks=[],

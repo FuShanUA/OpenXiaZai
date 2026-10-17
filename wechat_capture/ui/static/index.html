@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6f5">
+  <title>微信视频号下载</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app-frame">
+  <aside class="side-rail">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <i data-lucide="play"></i>
+      </span>
+      <span class="brand-copy">
+        <strong>视频号下载</strong>
+        <small id="subtitle" aria-live="polite">连接中</small>
+      </span>
+    </div>
+
+    <nav class="side-nav" id="tabs" aria-label="视图切换">
+      <button type="button" data-tab="captures" class="active">
+        <i data-lucide="radio"></i>
+        <span>捕获队列</span>
+        <em id="tab-captures"></em>
+      </button>
+      <button type="button" data-tab="live">
+        <i data-lucide="video"></i>
+        <span>直播录制</span>
+        <em id="tab-live"></em>
+      </button>
+      <button type="button" data-tab="library">
+        <i data-lucide="check-check"></i>
+        <span>下载完成</span>
+        <em id="tab-library"></em>
+      </button>
+    </nav>
+
+    <div class="rail-status">
+      <span class="rail-title">捕获链路</span>
+      <div id="dots" class="status-list"></div>
+    </div>
+
+    <button id="service-toggle" class="rail-action service-toggle" type="button" aria-pressed="true" title="关闭后恢复系统代理，不再捕获新视频">
+      <i data-lucide="power"></i>
+      <span id="service-toggle-label">关闭捕获</span>
+    </button>
+
+    <button id="selftest" class="rail-action" title="运行解密器自检">
+      <i data-lucide="activity"></i>
+      <span>解密自检</span>
+    </button>
+  </aside>
+
+  <main class="workspace">
+    <header class="command-bar">
+      <div class="command-copy">
+        <span>工作台</span>
+        <h1>微信视频号下载</h1>
+      </div>
+      <div class="command-state">
+        <span class="state-chip" id="capture-state">
+          <i data-lucide="wifi"></i>
+          <span>等待捕获</span>
+        </span>
+        <span class="state-chip muted" id="version-state">
+          <i data-lucide="layers"></i>
+          <span>UI v7</span>
+        </span>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+    <section class="metrics" aria-label="下载概览">
+      <div class="metric">
+        <span>已捕获</span>
+        <strong id="metric-captures">0</strong>
+      </div>
+      <div class="metric">
+        <span>可下载</span>
+        <strong id="metric-available">0</strong>
+      </div>
+      <div class="metric">
+        <span>已完成</span>
+        <strong id="metric-downloads">0</strong>
+      </div>
+      <div class="metric">
+        <span>进行中</span>
+        <strong id="metric-active">0</strong>
+      </div>
+    </section>
+
+    <div class="workspace-grid">
+      <aside class="queue-pane">
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">队列</span>
+            <h2 id="pane-title">捕获 <span class="muted" id="count"></span></h2>
+          </div>
+          <label class="scope">
+            <span>显示</span>
+            <select id="scope">
+              <option value="watched">只看观看过的</option>
+              <option value="downloaded">含客户端已下载的</option>
+              <option value="all">全部(含预取)</option>
+            </select>
+          </label>
+        </div>
+        <p id="hidden-note" class="hidden-note" hidden></p>
+        <div id="list" class="list"></div>
+        <p id="empty" class="empty">
+          暂无捕获
+        </p>
+      </aside>
+
+      <section class="detail-pane" id="detail"></section>
+    </div>
+
+    <details class="events" open>
+      <summary>
+        <i data-lucide="terminal"></i>
+        <span>事件流</span>
+        <em id="event-count"></em>
+      </summary>
+      <div id="events" class="events-body"></div>
+    </details>
+  </main>
+</div>
+
+<template id="tpl-row">
+  <button class="row" type="button">
+    <span class="row-media" aria-hidden="true">
+      <i data-lucide="film"></i>
+    </span>
+    <span class="row-body">
+      <span class="row-top">
+        <strong class="row-title"></strong>
+        <span class="row-badge badge"></span>
+      </span>
+      <span class="row-sub"></span>
+      <span class="row-meta"></span>
+      <span class="row-progress" hidden><span></span></span>
+    </span>
+  </button>
+</template>
+
+<template id="tpl-live-detail">
+  <article class="detail-card">
+    <div class="video-stage">
+      <video class="d-video" controls playsinline preload="metadata" hidden></video>
+      <div class="stage-empty live-stage">
+        <span class="live-mark" aria-hidden="true">
+          <i data-lucide="radio"></i>
+        </span>
+        <strong class="live-state-label">等待录制</strong>
+        <span class="stage-note">录制完成后在这里播放</span>
+        <div class="stage-progress" hidden><span></span></div>
+      </div>
+      <div class="stage-overlay">
+        <strong class="d-title"></strong>
+        <span class="d-author"></span>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <header class="d-header">
+        <div class="d-heading">
+          <span class="eyebrow">直播详情</span>
+          <strong class="d-title"></strong>
+        </div>
+        <span class="d-badge badge"></span>
+      </header>
+
+      <div class="progress-wrap live-progress" hidden>
+        <div class="progress-head">
+          <span class="progress-state"></span>
+          <span class="d-progress-text"></span>
+        </div>
+        <div class="progress-track"><span class="d-progress"></span></div>
+      </div>
+
+      <section class="finder-panel" aria-label="录制位置">
+        <div class="finder-toolbar">
+          <span class="finder-title">
+            <i data-lucide="folder-open"></i>
+            <span>录制位置</span>
+          </span>
+          <button class="live-reveal btn ghost" type="button">
+            <i data-lucide="search"></i>
+            <span>在 Finder 中显示</span>
+          </button>
+        </div>
+        <code class="finder-path" title=""></code>
+      </section>
+
+      <div class="actions">
+        <button class="live-record btn primary" type="button">
+          <i data-lucide="circle"></i>
+          <span>开始录制</span>
+        </button>
+        <button class="live-stop btn danger" type="button">
+          <i data-lucide="square"></i>
+          <span>停止录制</span>
+        </button>
+        <button class="live-open btn primary" type="button">
+          <i data-lucide="play"></i>
+          <span>播放视频</span>
+        </button>
+      </div>
+      <p class="d-hint"></p>
+
+      <footer class="d-meta live-meta"></footer>
+    </div>
+  </article>
+</template>
+
+<template id="tpl-detail">
+  <article class="detail-card">
+    <div class="video-stage">
+      <video class="d-video" controls playsinline preload="metadata" hidden></video>
+      <div class="stage-empty">
+        <button class="stage-play" type="button">
+          <i data-lucide="play"></i>
+          <span>点击播放</span>
+        </button>
+        <span class="stage-note">将下载并解密当前选择的画质</span>
+        <div class="stage-progress" hidden><span></span></div>
+      </div>
+      <div class="stage-overlay">
+        <strong class="d-title"></strong>
+        <span class="d-author"></span>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <header class="d-header">
+        <div class="d-heading">
+          <span class="eyebrow">视频详情</span>
+          <strong class="d-title"></strong>
+        </div>
+        <span class="d-badge badge"></span>
+      </header>
+
+      <div class="progress-wrap" hidden>
+        <div class="progress-head">
+          <span class="progress-state"></span>
+          <span class="d-progress-text"></span>
+        </div>
+        <div class="progress-track"><span class="d-progress"></span></div>
+      </div>
+
+      <section class="detail-section">
+        <h3>选择画质</h3>
+        <div class="d-formats"></div>
+      </section>
+
+      <div class="actions">
+        <button class="d-download btn primary">
+          <i data-lucide="download"></i>
+          <span>下载</span>
+        </button>
+        <button class="d-probe btn ghost">
+          <i data-lucide="refresh-cw"></i>
+          <span>重新探测</span>
+        </button>
+      </div>
+      <p class="d-hint"></p>
+
+      <footer class="d-meta"></footer>
+      <p class="d-keyline"></p>
+    </div>
+  </article>
+</template>
+
+<template id="tpl-library-detail">
+  <article class="detail-card">
+    <div class="video-stage">
+      <video class="d-video" controls playsinline preload="metadata" hidden></video>
+      <div class="stage-empty">
+        <i data-lucide="monitor-play"></i>
+        <span>暂无可播放文件</span>
+      </div>
+      <div class="stage-overlay">
+        <strong class="d-title"></strong>
+        <span class="d-author"></span>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <header class="d-header">
+        <div class="d-heading">
+          <span class="eyebrow">下载完成</span>
+          <strong class="d-title"></strong>
+        </div>
+        <span class="d-badge badge ok">已完成</span>
+      </header>
+
+      <section class="finder-panel" aria-label="下载位置">
+        <div class="finder-toolbar">
+          <span class="finder-title">
+            <i data-lucide="folder-open"></i>
+            <span>下载位置</span>
+          </span>
+          <button class="d-reveal btn ghost" type="button">
+            <i data-lucide="search"></i>
+            <span>在 Finder 中显示</span>
+          </button>
+        </div>
+        <code class="finder-path" title=""></code>
+        <div class="finder-list"></div>
+      </section>
+
+      <div class="actions">
+        <button class="d-open btn primary" type="button">
+          <i data-lucide="play"></i>
+          <span>播放视频</span>
+        </button>
+      </div>
+    </div>
+  </article>
+</template>
+
+<template id="tpl-finder-file">
+  <button class="finder-file" type="button">
+    <i data-lucide="film"></i>
+    <span class="finder-file-body">
+      <strong class="finder-name"></strong>
+      <span class="finder-meta"></span>
+    </span>
+    <i data-lucide="play" class="finder-play"></i>
+  </button>
+</template>
+
+<template id="tpl-format">
+  <label class="fmt">
+    <input type="radio" name="quality">
+    <span class="fmt-check" aria-hidden="true"></span>
+    <span class="fmt-body">
+      <span class="fmt-label"></span>
+      <span class="fmt-size"></span>
+    </span>
+    <span class="fmt-tags"></span>
+  </label>
+</template>
+
+<script src="/static/vendor/lucide.min.js"></script>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

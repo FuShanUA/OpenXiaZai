@@ -44,6 +44,8 @@ input[type=text]:focus{border-color:var(--accent)}
 .badge.m3u8{color:#c9a3ff}
 .badge.direct{color:#c9a3ff}
 .badge.yt_media{color:#ff5c5c}
+.badge.loom{color:#625df5}
+.badge.wechat_video{color:#07c160}
 .badge.bilibili{color:#00a1d6}
 .badge.weibo{color:#ff5722}
 .badge.douyin{color:#ccc}
@@ -120,6 +122,25 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 .modal-foot{border-top:1px solid var(--border);padding:0}
 .drag-handle{cursor:grab}
 .drag-handle:active{cursor:grabbing}
+/* WeChat Channels capture */
+.wx-status{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.wx-phase{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);padding:10px 0 2px}
+.wx-phase .spinner{flex-shrink:0}
+.wx-actions{display:flex;gap:8px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--border)}
+.wx-list{max-height:300px;overflow:auto;padding:8px 0}
+.wx-item{border:1px solid var(--border);background:var(--panel2);border-radius:8px;padding:10px;margin-bottom:8px}
+.wx-item .title{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wx-item .meta{font-size:11px;color:var(--muted);margin-top:3px}
+.wx-item .actions{display:flex;gap:8px;align-items:center;margin-top:8px}
+.wx-item select{background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 7px;font-size:12px}
+.wx-task{padding:8px 0;border-bottom:1px solid var(--border)}
+.wx-task:last-child{border-bottom:none}
+.wx-task-top{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted)}
+.wx-task-top .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wx-task-meta{font-size:11px;color:var(--muted);margin-top:4px}
+.wx-task .bar{margin-top:6px}
+.wx-empty{color:var(--muted);font-size:13px;padding:18px 0;text-align:center}
+.wx-note{font-size:12px;color:var(--warn);line-height:1.6;padding:10px 0}
 /* file picker */
 .picker-toolbar{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
 .picker-filter{display:flex;gap:2px;flex-wrap:wrap}
@@ -166,7 +187,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 <div class="wrap">
   <header>
     <div class="logo">⬇</div>
-    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X · B站 · 微博 · 抖音 · TikTok · Facebook · Spotify</div></div>
+    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X · B站 · 微博 · 抖音 · TikTok · Facebook · Spotify · Loom · 微信视频号</div></div>
     <div style="flex:1"></div>
     <button class="btn sm" id="settingsBtn" title="设置" style="font-size:22px;padding:4px 8px">⚙</button>
   </header>
@@ -177,6 +198,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
         <input type="text" id="url" placeholder="粘贴链接：magnet:、http(s)://、ftp://、ed2k://、YouTube、X/Twitter、B站、微博、抖音、TikTok、Facebook、Spotify、种子文件路径…" style="flex:1;padding-right:28px">
         <button id="clearUrlBtn" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:4px 6px;display:none;line-height:1" title="清空">✕</button>
       </div>
+      <button class="btn sm" id="wechatBtn" title="抓取微信视频号">视频号</button>
       <button class="btn sm" id="menuBtn" title="更多操作">⋮</button>
       <button class="btn primary" id="addBtn">添加下载</button>
     </div>
@@ -351,6 +373,29 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
   </div>
 </div>
 
+<!-- macOS WeChat Channels capture -->
+<div class="modal-overlay" id="wechatMacOverlay" style="display:none">
+  <div class="modal" style="width:720px">
+    <div class="modal-head"><h3>微信视频号捕获</h3></div>
+    <div class="modal-body" style="padding:14px 20px">
+      <div class="wx-status" id="wxStatus"><span class="spinner"></span>正在读取状态…</div>
+      <div class="wx-phase" id="wxPhase" style="display:none"></div>
+      <div class="wx-actions">
+        <button class="btn sm" id="wxPrepare">下载解密组件</button>
+        <button class="btn sm" id="wxSelftest">自检</button>
+        <button class="btn sm" id="wxCert">导入证书</button>
+        <button class="btn sm primary" id="wxStartStop">启动捕获</button>
+      </div>
+      <div class="wx-note" id="wxNotice" style="display:none"></div>
+      <div class="wx-list" id="wxVideos"></div>
+      <div id="wxTasks"></div>
+    </div>
+    <div class="modal-foot" style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
+      <button class="btn" id="wxClose">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 下拉菜单 -->
 <div id="dropMenu" class="ctx-menu" style="display:none">
   <div class="ctx-item" data-action="paste">📋 从剪贴板粘贴</div>
@@ -369,7 +414,8 @@ window.onerror=function(msg,url,line,col,err){
 <script src="/static/qrcode.min.js"></script>
 <script>
 const $=id=>document.getElementById(id);
-const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",vimeo:"Vimeo 视频",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
+const IS_MACOS={{ 'true' if is_macos else 'false' }};
+const TYPES={torrent:"种子/磁力",torrent_file:"本地种子文件",torrent_url:"远程种子文件",http:"HTTP 直链",ftp:"FTP",ed2k:"电驴→种子",quark:"夸克网盘",cloud:"网盘",thunder:"迅雷",m3u8:"M3U8流媒体",direct:"视频直链",yt_media:"YouTube 视频",vimeo:"Vimeo 视频",loom:"Loom 视频",wechat_video:"微信视频号",bilibili:"B站视频",weibo:"微博视频",douyin:"抖音视频",douyin_live:"抖音直播",tiktok:"TikTok 视频",facebook:"Facebook 视频",spotify:"Spotify 音乐",netease:"网易音乐",kuaishou:"快手视频",xiaohongshu:"小红书",ixigua:"西瓜视频",mgtv:"芒果TV",iqiyi:"爱奇艺",tencent:"腾讯视频"};
 const UNSUP={quark:1,cloud:1};
 let activeTab='tasks';
 let cur=null;
@@ -427,10 +473,13 @@ function detectType(v){
   if(/https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//.test(v))return 'yt_media';
   if(/https?:\/\/(www\.)?(x\.com|twitter\.com|t\.co)\//.test(v))return 'yt_media';
   if(/https?:\/\/(www\.|player\.)?vimeo\.com\//.test(v))return 'vimeo';
+  if(/https?:\/\/(www\.)?loom\.com\/(share|embed)\//.test(v))return 'loom';
+  if(/https?:\/\/finder\.video\.qq\.com\/251\/20302\//.test(v))return 'wechat_video';
   if(/https?:\/\/(www\.)?bilibili\.com\/(video|bangumi)\//.test(v))return 'bilibili';
   if(/https?:\/\/b23\.tv\//.test(v))return 'bilibili';
   if(/https?:\/\/(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn)\//.test(v))return 'weibo';
   if(/https?:\/\/t\.cn\//.test(v))return 'weibo';
+  if(/https?:\/\/(www\.)?live\.douyin\.com\//.test(v))return 'douyin_live';
   if(/https?:\/\/(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com)\//.test(v))return 'douyin';
   if(/https?:\/\/(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)\//.test(v))return 'tiktok';
   if(/https?:\/\/(www\.)?facebook\.com\//.test(v)&&(/\/video/.test(v)||/\/watch/.test(v)||/\/reel/.test(v)||/\/posts/.test(v)||/\/permalink/.test(v)))return 'facebook';
@@ -452,8 +501,8 @@ $('url').addEventListener('input',()=>{
   if(!v){h.style.display='none';return}
   const t=detectType(v);
   h.style.display='block';
-  const YT_TYPES=['yt_media','vimeo','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','iqiyi','tencent'];
-  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(YT_TYPES.includes(t)?' · 将使用 yt-dlp 下载':'')+(t==='bilibili'?' · 将使用B站API解析':'');
+  const YT_TYPES=['yt_media','vimeo','loom','weibo','douyin','tiktok','facebook','spotify','netease','kuaishou','xiaohongshu','ixigua','mgtv','iqiyi','tencent'];
+  h.innerHTML='识别为 <span class="badge '+(UNSUP[t]?'unsup':t)+'">'+TYPES[t]+'</span>'+(UNSUP[t]?' · 暂不支持直接下载':'')+(t==='ed2k'?' · 将搜索种子源':'')+(t==='douyin_live'?' · 解析后开始录制，手动停止保留文件':'')+(YT_TYPES.includes(t)?' · 将使用 yt-dlp 下载':'')+(t==='bilibili'?' · 将使用B站API解析':'');
 });
 
 // 从分享文本中提取真实 URL（抖音/快手/小红书等 App 分享会带口令前缀）
@@ -487,6 +536,16 @@ $('addBtn').onclick=async()=>{
     return;
   }
 
+  // 微信视频号直链：来自 PC 微信内存抓取，直接交给 aria2
+  if(/https?:\/\/finder\.video\.qq\.com\/251\/20302\//.test(v)){
+    showDirectPreview({
+      type:'wechat_video',
+      title:url.split('/').pop().split('?')[0]||'微信视频号视频',
+      url:url
+    });
+    return;
+  }
+
   // 本地种子文件 / 远程种子 URL → 出浮窗预览（点击后 add + 文件选择）
   if((!v.startsWith('http')&&!v.startsWith('ftp')&&!v.startsWith('magnet')&&!v.startsWith('ed2k')&&!v.startsWith('thunder')&&v.endsWith('.torrent'))
      ||(v.startsWith('http')&&v.split('?')[0].split('#')[0].endsWith('.torrent'))){
@@ -513,6 +572,26 @@ $('addBtn').onclick=async()=>{
   }
 
   // 快手/抖音专用：使用 /api/add 走平台专用解析器
+  if(/https?:\/\/(www\.)?live\.douyin\.com\//.test(v)){
+    $('addBtn').disabled=true;$('addBtn').textContent='解析直播流…';
+    try{
+      const res=await post('/api/douyin_live_info',{url});
+      if(!res||res.ok===false){
+        const errMsg=res?.error||'获取抖音直播信息失败';
+        const hint=res?.hint||'';
+        await customAlert(errMsg+(hint?'\n\n'+hint:''),{title:'解析失败'});
+        $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+        return;
+      }
+      showDirectPreview({
+        type:'douyin_live',title:res.title||'抖音直播',url:res.url,
+        m3u8_url:res.m3u8_url,poster:res.poster,size:'',is_live:true
+      });
+    }catch(e){await customAlert('获取抖音直播信息失败: '+e.message)}
+    $('addBtn').disabled=false;$('addBtn').textContent='添加下载';
+    return;
+  }
+
   const KS_DY_PLATFORMS=/https?:\/\/(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com|kuaishou\.com|gif\.kuaishou\.com|v\.kuaishou\.com)\//;
   if(KS_DY_PLATFORMS.test(v)){
     $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
@@ -532,7 +611,7 @@ $('addBtn').onclick=async()=>{
   }
 
   // yt-dlp 支持的更多平台（微博/TikTok/Facebook/Spotify/网易/小红书/西瓜/芒果/爱奇艺/腾讯）
-  const YT_PLATFORMS=/https?:\/\/((www\.|player\.)?vimeo\.com|(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|qy\.net|v\.qq\.com|film\.qq\.com|t\.cn))\//;
+  const YT_PLATFORMS=/https?:\/\/((www\.|player\.)?vimeo\.com|(www\.)?loom\.com\/(?:share|embed)|(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|facebook\.com|open\.spotify\.com|music\.163\.com|xiaohongshu\.com|xhslink\.com|ixigua\.com|mgtv\.com|m\.mgtv\.com|iqiyi\.com|qy\.net|v\.qq\.com|film\.qq\.com|t\.cn))\//;
   if(YT_PLATFORMS.test(v)){
     $('addBtn').disabled=true;$('addBtn').textContent='获取视频信息…';
     try{
@@ -675,6 +754,247 @@ async function pasteIntoInput(){
 // ---- 输入框清空按钮 ----
 $('url').addEventListener('input',()=>{$('clearUrlBtn').style.display=$('url').value?'block':'none'});
 $('clearUrlBtn').onclick=()=>{$('url').value='';$('url').dispatchEvent(new Event('input'));$('clearUrlBtn').style.display='none';$('url').focus()};
+
+// ---- 微信视频号 ----
+let wxMacTimer=null;
+let wxBusyTimer=null;
+function wxElapsedText(seconds){
+  if(seconds<60)return Math.max(0,Math.round(seconds))+' 秒';
+  if(seconds<3600)return Math.floor(seconds/60)+' 分 '+Math.round(seconds%60)+' 秒';
+  return Math.floor(seconds/3600)+' 时 '+Math.round((seconds%3600)/60)+' 分';
+}
+function wxSetBusyButton(btn,prefix){
+  const startedAt=Date.now();
+  btn.disabled=true;
+  btn.textContent=prefix+' 0 秒';
+  if(wxBusyTimer)clearInterval(wxBusyTimer);
+  wxBusyTimer=setInterval(()=>{
+    btn.textContent=prefix+' '+wxElapsedText((Date.now()-startedAt)/1000);
+  },1000);
+}
+function wxClearBusyButton(btn,label){
+  if(wxBusyTimer){clearInterval(wxBusyTimer);wxBusyTimer=null}
+  btn.disabled=false;btn.textContent=label;
+}
+function openWechatMacModal(){
+  $('wechatMacOverlay').style.display='flex';
+  refreshWechatMac();
+  if(wxMacTimer)clearInterval(wxMacTimer);
+  wxMacTimer=setInterval(refreshWechatMac,2000);
+}
+function closeWechatMacModal(){
+  $('wechatMacOverlay').style.display='none';
+  if(wxMacTimer){clearInterval(wxMacTimer);wxMacTimer=null}
+}
+async function refreshWechatMac(){
+  try{
+    const r=await fetch('/api/wechat_mac/status');
+    const data=await r.json();
+    renderWechatMac(data);
+  }catch(e){
+    $('wxStatus').textContent='状态读取失败: '+e.message;
+  }
+}
+function wxQualityOptions(video){
+  const specs=Array.isArray(video.spec)?video.spec:[];
+  const seen=new Set();
+  let html='<option value="best">原片</option>';
+  specs.forEach(spec=>{
+    const value=String(spec.file_format||'').trim();
+    if(!value||seen.has(value))return;
+    seen.add(value);
+    const h=spec.height?spec.height+'p':'';
+    const rate=spec.video_bitrate?spec.video_bitrate+' kbps':'';
+    const label=[h,rate].filter(Boolean).join(' · ')||value;
+    html+='<option value="'+esc(value)+'">'+esc(label)+'</option>';
+  });
+  return html;
+}
+function renderWechatMac(data){
+  const deps=data.dependencies||{};
+  const running=!!data.running;
+  const capture=data.capture||{};
+  const counters=capture.counters||{};
+  const session=capture.session||{};
+  const videos=Array.isArray(data.videos)?data.videos:[];
+  const tasks=Array.isArray(data.tasks)?data.tasks:[];
+  const activeTasks=tasks.filter(task=>['queued','downloading','decrypting'].includes(task.state));
+  const status=$('wxStatus');
+  status.innerHTML='';
+  const state=document.createElement('span');
+  state.textContent=running?'捕获运行中 · 代理 127.0.0.1:'+(data.proxy_port||9090):'捕获未运行';
+  state.style.color=running?'var(--accent2)':'var(--muted)';
+  status.appendChild(state);
+  [['mitmproxy',deps.mitmdump],['Node.js',deps.node],['解密组件',deps.wasm],['证书',deps.cert_installed]].forEach(([name,ok])=>{
+    const pill=document.createElement('span');
+    pill.className='badge '+(ok?'wechat_video':'unsup');
+    pill.textContent=name+(ok?'':'缺失');
+    status.appendChild(pill);
+  });
+
+  const phase=$('wxPhase');
+  const elapsed=data.started_at?Math.max(0,(Date.now()/1000-data.started_at)):0;
+  const injected=!!capture.js_seen||!!counters.html_injections||!!counters.js_hook_injected;
+  let phaseText='';
+  if(!running){
+    phaseText='捕获未运行';
+  }else if(data.capture_error){
+    phaseText='捕获服务连接中，已等待 '+wxElapsedText(elapsed);
+  }else if(session.proxy_configured===false){
+    phaseText='系统代理尚未确认，代理看护会自动恢复；已等待 '+wxElapsedText(elapsed);
+  }else if(!injected){
+    phaseText='代理已生效，等待微信视频号页面加载；请打开或刷新回放，已等待 '+wxElapsedText(elapsed);
+  }else if(!videos.length){
+    phaseText='页面注入已生效，等待回放产生媒体记录；已等待 '+wxElapsedText(elapsed);
+  }else if(activeTasks.length){
+    const task=activeTasks[0];
+    phaseText=task.state==='decrypting'?'下载完成，正在解密':'正在下载已捕获视频';
+  }else{
+    phaseText='已捕获 '+videos.length+' 个视频，可在下方选择画质下载';
+  }
+  phase.style.display='flex';
+  phase.innerHTML='<span class="spinner"></span><span>'+esc(phaseText)+'</span>';
+
+  $('wxPrepare').disabled=!deps.node||running;
+  $('wxSelftest').disabled=!deps.node||!deps.wasm;
+  $('wxCert').disabled=!deps.cert_file;
+  $('wxStartStop').textContent=running?'停止并恢复代理':'启动捕获';
+  $('wxStartStop').className='btn sm '+(running?'danger':'primary');
+
+  const notice=$('wxNotice');
+  if(!deps.cert_installed){
+    notice.style.display='block';
+    notice.textContent='首次使用需信任 mitmproxy CA：点「导入证书」并选择 login 钥匙串，然后在钥匙串访问中把 SSL 设为始终信任，最后完全退出并重启微信。';
+  }else if(data.capture_error){
+    notice.style.display='block';
+    notice.textContent=data.capture_error;
+  }else{
+    notice.style.display='none';
+  }
+
+  const list=$('wxVideos');
+  if(!videos.length){
+    list.innerHTML='<div class="wx-empty">'+esc(running?'正在等待微信回放进入捕获链路':'暂无捕获结果')+'</div>';
+  }else{
+    list.innerHTML=videos.map(video=>{
+      const title=video.title||video.author||('视频 '+(video.file_key||'').slice(0,10));
+      const size=video.fileSize?fmtB(video.fileSize):'';
+      const dim=video.width&&video.height?video.width+'x'+video.height:'';
+      const expired=video.link_expired;
+      const meta=[size,dim,expired?'链接已过期，回微信重播':''].filter(Boolean).join(' · ');
+      return '<div class="wx-item" data-file-key="'+esc(video.file_key)+'">'+
+        '<div class="title">'+esc(title)+'</div>'+
+        '<div class="meta">'+esc(meta||'微信视频号')+'</div>'+
+        '<div class="actions"><select class="wx-quality">'+wxQualityOptions(video)+'</select>'+
+        '<button class="btn sm go wx-download"'+(expired?' disabled':'')+'>下载</button></div>'+
+        '</div>';
+    }).join('');
+  }
+
+  const taskBox=$('wxTasks');
+  if(tasks.length){
+    const videoByFileKey=new Map(videos.map(video=>[video.file_key,video]));
+    taskBox.innerHTML='<div style="font-size:12px;color:var(--muted);margin:10px 0 4px">下载任务</div>'+
+      tasks.map(task=>{
+        const pct=task.percent!=null?task.percent+'%':'--';
+        const state={queued:'排队',downloading:'下载',decrypting:'解密',done:'完成',failed:'失败'}[task.state]||task.state;
+        const title=videoByFileKey.get(task.file_key)?.title||task.file_key;
+        const progress=task.state==='done'?100:(task.percent||0);
+        let detail='';
+        if(task.state==='failed'){
+          detail='失败：'+(task.error||'未知原因');
+        }else if(task.state==='decrypting'){
+          detail='下载完成，正在解密…';
+        }else if(task.state==='downloading'){
+          detail=[
+            (task.received_human||fmtB(task.received))+' / '+(task.total_human||(task.total?fmtB(task.total):'未知')),
+            task.speed?fmtR(task.speed):'',
+            task.eta_seconds!=null?'剩余 '+fmtTime(task.eta_seconds):''
+          ].filter(Boolean).join(' · ');
+        }else if(task.state==='queued'){
+          detail='等待开始';
+        }else{
+          detail='已完成'+(task.output?' · '+task.output.split('/').pop():'');
+        }
+        return '<div class="wx-task">'+
+          '<div class="wx-task-top"><span>'+esc(state)+'</span><span class="name">'+esc(title+' · '+(task.label||task.quality))+'</span><span>'+esc(pct)+'</span></div>'+
+          '<div class="bar"><i style="width:'+Number(progress).toFixed(1)+'%"></i></div>'+
+          '<div class="wx-task-meta">'+esc(detail)+'</div>'+
+          '</div>';
+      }).join('');
+  }else{
+    taskBox.innerHTML='';
+  }
+}
+$('wechatBtn').onclick=async()=>{
+  if(IS_MACOS){
+    openWechatMacModal();
+    return;
+  }
+  const btn=$('wechatBtn');
+  btn.disabled=true;btn.textContent='抓取中…';
+  try{
+    const res=await post('/api/wechat_capture',{});
+    if(!res||res.ok===false){
+      await customAlert(res?.error||'未找到微信视频号链接',{title:'抓取失败'});
+    }else{
+      showDirectPreview({
+        type:'wechat_video',
+        title:res.title||'微信视频号视频',
+        url:res.url,
+        urls:Array.isArray(res.urls)?res.urls:[res.url]
+      });
+    }
+  }finally{
+    btn.disabled=false;btn.textContent='视频号';
+  }
+};
+
+$('wxClose').onclick=closeWechatMacModal;
+$('wxPrepare').onclick=async()=>{
+  const btn=$('wxPrepare');btn.disabled=true;btn.textContent='下载中…';
+  const res=await post('/api/wechat_mac/prepare',{});
+  btn.disabled=false;btn.textContent='下载解密组件';
+  if(!res||res.ok===false){await customAlert(res?.error||'下载失败',{title:'解密组件'})}
+  else{refreshWechatMac()}
+};
+$('wxSelftest').onclick=async()=>{
+  const btn=$('wxSelftest');btn.disabled=true;btn.textContent='自检中…';
+  const res=await post('/api/wechat_mac/selftest',{});
+  btn.disabled=false;btn.textContent='自检';
+  if(!res||res.ok===false){await customAlert(res?.error||'自检失败',{title:'解密自检'})}
+  else{await customAlert('解密自检通过',{title:'解密自检'})}
+};
+$('wxCert').onclick=async()=>{
+  const res=await post('/api/wechat_mac/open_certificate',{});
+  if(!res||res.ok===false){await customAlert(res?.error||'证书尚未生成',{title:'mitmproxy 证书'})}
+  else{await customAlert(res.instructions||'证书已导入 login 钥匙串，请把 SSL 信任设为始终信任。',{title:'mitmproxy 证书'})}
+};
+$('wxStartStop').onclick=async()=>{
+  const running=$('wxStartStop').textContent.startsWith('停止');
+  if(!running){
+    const ok=await customConfirm('启动会临时把当前网络服务的 HTTP/HTTPS 代理指向 127.0.0.1:9090，停止时恢复原设置。首次使用还需信任 mitmproxy CA。',{title:'开启 Mac 捕获',okText:'启动'});
+    if(!ok)return;
+  }
+  const btn=$('wxStartStop');btn.disabled=true;btn.textContent=running?'停止中…':'启动中…';
+  const res=await post('/api/wechat_mac/'+(running?'stop':'start'),{});
+  btn.disabled=false;
+  refreshWechatMac();
+  if(!res||res.ok===false){await customAlert(res?.error||'操作失败',{title:'微信视频号捕获'})}
+};
+$('wxVideos').addEventListener('click',async e=>{
+  const btn=e.target.closest('.wx-download');
+  if(!btn||btn.disabled)return;
+  const item=btn.closest('.wx-item');
+  const fileKey=item?.dataset.fileKey;
+  const quality=item?.querySelector('.wx-quality')?.value||'best';
+  if(!fileKey)return;
+  btn.disabled=true;btn.textContent='启动中…';
+  const res=await post('/api/wechat_mac/download',{file_key:fileKey,quality});
+  btn.disabled=false;btn.textContent='下载';
+  if(!res||res.ok===false){await customAlert(res?.error||'下载启动失败',{title:'微信视频号下载'})}
+  refreshWechatMac();
+});
 
 // ---- 下拉菜单（⋮ 按钮） ----
 (function(){
@@ -839,7 +1159,9 @@ function showDirectPreview(data){
   const badgeCls='badge '+(data.type||'http');
   const typeLabel=TYPES[data.type]||data.type||'直链';
   let meta=data.size?('大小: '+data.size):'';
+  if(data.is_live)meta='直播中 · 停止录制后保留已录制部分';
   if(data.magnet){meta=(meta?meta+' · ':'')+'磁力链接'}
+  if(Array.isArray(data.urls)&&data.urls.length>1){meta=(meta?meta+' · ':'')+'共 '+data.urls.length+' 条直链'}
   card.innerHTML='<div class="row" style="align-items:flex-start">'+
     '<div style="flex:1;min-width:0">'+
     '<div style="font-weight:600;font-size:13px;margin-bottom:2px">'+esc(data.title||'未知文件')+' <span class="'+badgeCls+'">'+esc(typeLabel)+'</span></div>'+
@@ -848,10 +1170,32 @@ function showDirectPreview(data){
     '<button class="yt-close" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:0 4px">✕</button>'+
     '</div>'+
     '<div class="row" style="margin-top:8px;gap:6px">'+
-    '<button class="btn go dl-direct" style="flex:1">直接下载</button>'+
-    '<button class="btn dl-queue">加入队列</button>'+
+    '<button class="btn go '+(data.is_live?'dl-record':'dl-direct')+'" style="flex:1">'+(data.is_live?'开始录制':'直接下载')+'</button>'+
+    (data.is_live?'':'<button class="btn dl-queue">加入队列</button>')+
     '</div>';
+  if(Array.isArray(data.urls)&&data.urls.length>1){
+    const select=document.createElement('select');
+    select.style.cssText='width:100%;margin-top:8px;padding:6px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px';
+    data.urls.forEach((u,i)=>{
+      const option=document.createElement('option');
+      option.value=u;
+      option.textContent=(i+1)+'. '+(u.split('/').pop().split('?')[0]||u);
+      select.appendChild(option);
+    });
+    select.value=data.url;
+    select.onchange=()=>{data.url=select.value};
+    const actions=card.querySelector('.row:last-child');
+    card.insertBefore(select,actions);
+  }
   const doAdd=async(paused)=>{
+    if(data.is_live){
+      const res=await post('/api/download_m3u8',{
+        url:data.m3u8_url||data.url,title:data.title,type:'douyin_live'
+      });
+      if(res&&res.ok){card.remove();switchTab('tasks')}
+      else{await customAlert(res?.error||'开始录制失败')}
+      return;
+    }
     if(data.type==='torrent'){
       const res=await post('/api/add',{url:data.magnet||data.url});
       if(res&&res.ok){card.remove();if(res.type==='torrent'){showFileModal(res.gid)}else{switchTab('tasks')}}
@@ -868,12 +1212,12 @@ function showDirectPreview(data){
       }else{await customAlert(res?.error||'添加失败')}
     }
   };
-  card.querySelector('.dl-direct').onclick=()=>doAdd(false);
-  card.querySelector('.dl-queue').onclick=()=>doAdd(true);
+  (card.querySelector('.dl-record')||card.querySelector('.dl-direct')).onclick=()=>doAdd(false);
+  if(card.querySelector('.dl-queue'))card.querySelector('.dl-queue').onclick=()=>doAdd(true);
   card.querySelector('.yt-close').onclick=()=>card.remove();
   let drag=null;
   card.addEventListener('mousedown',e=>{
-    if(e.target.tagName==='BUTTON'||e.target.classList.contains('yt-close'))return;
+    if(e.target.tagName==='BUTTON'||e.target.tagName==='SELECT'||e.target.classList.contains('yt-close'))return;
     drag={x:e.clientX-card.offsetLeft,y:e.clientY-card.offsetTop};
     card.classList.add('dragging');card.style.transition='none';
   });
@@ -1353,6 +1697,8 @@ async function pollBiliQr(){
     }
   }catch(e){
     clearInterval(biliQrTimer);biliQrTimer=null;
+    $('biliQrStatus').textContent='网络异常，请刷新二维码重试';
+    $('biliQrStatus').style.color='var(--danger)';
   }
 }
 
@@ -1602,12 +1948,12 @@ function renderTask(t){
   const now=Date.now()/1000;
   const elapsed=t.added_at?Math.round(now-t.added_at):0;
   const timeInfo=(t.added_at&&(t.state==='downloading'||t.state==='fetching'||t.state==='queued'))?
-    '<span>⏱ '+fmtTime(elapsed)+'</span>'+(t.progress>0?'<span>剩余 '+fmtETA(t.progress,elapsed)+'</span>':''):'';
+    '<span>⏱ '+fmtTime(elapsed)+'</span>'+((t.progress>0&&!t.is_live)?'<span>剩余 '+fmtETA(t.progress,elapsed)+'</span>':''):'';
   let html='<div class="top">'
     +'<span class="state-dot '+t.state+'"></span>'
     +'<span class="badge '+t.type+'">'+(TYPES[t.type]||t.type)+'</span>'
     +'<span class="name" title="'+esc(t.name)+'">'+esc(t.name)+'</span>'
-    +'<span class="pill">'+(t.progress>0?t.progress.toFixed(0)+'%':t.size?fmtB(t.size):'--')+'</span>'
+    +'<span class="pill">'+(t.is_live&&t.state==='downloading'?'录制中':(t.progress>0?t.progress.toFixed(0)+'%':t.size?fmtB(t.size):'--'))+'</span>'
     +'</div>'
     +'<div class="meta">'
     +'<span>'+fmtB(t.size)+'</span>'
@@ -1637,9 +1983,12 @@ function renderTask(t){
     html+='</div>';
   }
   html+='<div class="row" style="margin-top:10px">';
+  const liveRecording=t.is_live&&(t.state==='downloading'||t.state==='fetching'||t.state==='queued');
  if(t.state==='downloading'||t.state==='fetching'||t.state==='queued'){
     if(t.gid&&t.gid.startsWith('cf_')){
      html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止</button>';
+   }else if(liveRecording){
+     html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">停止录制</button>';
    }else{
      html+='<button class="btn sm warn" data-act="pause" data-g="'+t.gid+'">暂停</button>';
    }
@@ -1650,13 +1999,16 @@ function renderTask(t){
   if(t.state==='error'){
     html+='<button class="btn sm go" data-act="retry" data-g="'+t.gid+'">重试</button>';
   }
-  html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">删除</button>';
+  if(!liveRecording)html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">删除</button>';
   html+='<button class="btn sm" data-act="openDir" data-g="'+t.gid+'" title="'+esc(t.dir||'')+'">📂</button></div>';
   el.innerHTML=html;
   el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
   el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
   el.querySelector('[data-act=retry]')?.addEventListener('click',async()=>{const r=await post('/api/retry',{gid:t.gid});if(r&&r.ok){poll();}else if(r&&r.error){await customAlert('重试失败: '+r.error);}});
-  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{if(await customConfirm('删除此任务？将移至回收站。',{danger:true}))await post('/api/stop',{gid:t.gid})});
+  el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{
+    const message=liveRecording?'停止录制？已录制部分会保留并移入回收站。':'删除此任务？将移至回收站。';
+    if(await customConfirm(message,{title:liveRecording?'停止录制':'删除任务',okText:liveRecording?'停止录制':'删除',danger:true}))await post('/api/stop',{gid:t.gid})
+  });
   el.querySelector('[data-act=openDir]')?.addEventListener('click',()=>post('/api/open_folder',{path:t.dir||''}));
   // File list toggle
   el.querySelector('.files-toggle')?.addEventListener('click',function(){

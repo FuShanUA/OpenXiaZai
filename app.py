@@ -11,7 +11,9 @@ import threading
 import socket
 import ipaddress
 import requests
+import atexit
 from urllib.parse import urlparse, parse_qs
+from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, Response
 
 # ---------------------------------------------------------------------------
@@ -118,20 +120,29 @@ def _find_binary(name):
 # Pre-resolve binary paths for subprocess calls (bundled or system)
 _FFMPEG = _find_binary("ffmpeg")
 _ARIA2C = _find_binary("aria2c")
+WECHAT_CAPTURE_SCRIPT = os.path.join(BASE_DIR, "wechat_capture", "mitmproxy_wechat_capture.py")
+WECHAT_WASM_FETCHER = os.path.join(BASE_DIR, "wechat_capture", "decrypt", "fetch_wasm_assets.mjs")
+WECHAT_DECRYPTOR = os.path.join(BASE_DIR, "wechat_capture", "decrypt", "wechat_video_decrypt.mjs")
+WECHAT_WASM_DIR = os.path.join(DATA_DIR, "vendor", "wechat_files", "raw")
+WECHAT_CAPTURE_PORT = 8765
+WECHAT_PROXY_PORT = 9090
 
-# Ensure yt_dlp can be found: check common locations (macOS venv, Windows, etc.)
-for _venv_base in [
-    os.path.join(os.path.expanduser("~"), "cc", ".venv", "lib"),   # macOS dev
-    os.path.join(sys.prefix, "Lib", "site-packages"),                  # Windows venv
-    os.path.join(os.path.expanduser("~"), ".venv", "lib"),           # generic venv
-]:
-    if os.path.isdir(_venv_base):
-        for _sub in os.listdir(_venv_base):
-            _sp = os.path.join(_venv_base, _sub, "site-packages") if _sub != "site-packages" else _venv_base
-            if os.path.isdir(_sp) and _sp not in sys.path:
-                # Append fallback environments. Inserting them would shadow the
-                # yt-dlp version installed in this app's active virtualenv.
-                sys.path.append(_sp)
+# In source runs, allow common development virtualenvs to supply yt_dlp. In a
+# frozen app, only the PyInstaller archive should be used; an external venv can
+# mix an older yt_dlp or native extensions into the packaged runtime.
+if not getattr(sys, "frozen", False):
+    for _venv_base in [
+        os.path.join(os.path.expanduser("~"), "cc", ".venv", "lib"),   # macOS dev
+        os.path.join(sys.prefix, "Lib", "site-packages"),                  # Windows venv
+        os.path.join(os.path.expanduser("~"), ".venv", "lib"),           # generic venv
+    ]:
+        if os.path.isdir(_venv_base):
+            for _sub in os.listdir(_venv_base):
+                _sp = os.path.join(_venv_base, _sub, "site-packages") if _sub != "site-packages" else _venv_base
+                if os.path.isdir(_sp) and _sp not in sys.path:
+                    # Append fallback environments. Inserting them would shadow the
+                    # yt-dlp version installed in this app's active virtualenv.
+                    sys.path.append(_sp)
 
 DEFAULT_SAVE = _downloads_dir()
 RECORDS_FILE = os.path.join(DATA_DIR, "records.json")
@@ -365,11 +376,20 @@ def classify(url):
         # public page is an HTML player URL, not a downloadable media file.
         if re.match(r'https?://(www\.|player\.)?vimeo\.com/', u):
             return "vimeo"
+        # 微信视频号 PC 客户端抓取到的 CDN 直链
+        if re.match(r'https?://finder\.video\.qq\.com/251/20302/', u):
+            return "wechat_video"
+        # Loom exposes signed HLS streams that yt-dlp can merge correctly.
+        if re.match(r'https?://(www\.)?loom\.com/(share|embed)/', u):
+            return "loom"
         # 微博 — yt-dlp handler (supports weibo.com, t.cn, share.api.weibo.cn)
         if re.match(r'https?://(www\.)?(weibo\.com|weibo\.cn|video\.weibo\.com|m\.weibo\.cn|share\.api\.weibo\.cn)/', u):
             return "weibo"
         if re.match(r'https?://t\.cn/', u):
             return "weibo"
+        # 抖音直播 — Playwright 拦流后交给 ffmpeg 录制
+        if re.match(r'https?://(www\.)?live\.douyin\.com/', u):
+            return "douyin_live"
         # 抖音 — yt-dlp handler
         if re.match(r'https?://(www\.)?(douyin\.com|v\.douyin\.com|iesdouyin\.com)/', u):
             return "douyin"
@@ -1361,6 +1381,32 @@ def _grab_stream_subprocess(platform, url):
     return None
 
 
+def _extract_douyin_live_info(url):
+    """Extract a Douyin live playback URL in an isolated Playwright subprocess."""
+    st = _grab_stream_subprocess('douyin_live', url)
+    if not st:
+        return {
+            "ok": False, "error": "抖音直播解析超时", "type": "douyin_live", "url": url,
+            "hint": "请确认直播间正在开播，然后重试。",
+        }
+    if st.get('error'):
+        return {
+            "ok": False, "error": "抖音直播解析失败: " + st['error'],
+            "type": "douyin_live", "url": url,
+            "hint": "请确认直播间正在开播；如页面要求登录或验证，请先在浏览器中打开一次。",
+        }
+    stream_url = st.get('m3u8_url') or ''
+    if not stream_url:
+        return {"ok": False, "error": "未获取到抖音直播流", "type": "douyin_live", "url": url}
+    return {
+        "ok": True, "type": "douyin_live", "title": st.get('title') or '抖音直播',
+        "poster": st.get('poster', ''), "uploader": st.get('uploader', ''),
+        "m3u8_url": stream_url, "magnet": "", "duration": 0,
+        "platform": "抖音直播", "formats": st.get('formats', []), "url": url,
+        "is_live": True,
+    }
+
+
 def _extract_iqiyi_info(url):
     """爱奇艺视频提取：子进程 Playwright 拦截 TS 分片直链。
     yt-dlp 的 iqiyi 提取器长期失效，这里自行抓流。"""
@@ -2046,9 +2092,12 @@ TYPES = {
     "ed2k": "电驴→种子搜索",
     "yt_media": "YouTube 视频",
     "vimeo": "Vimeo 视频",
+    "loom": "Loom 视频",
+    "wechat_video": "微信视频号",
     "bilibili": "B站视频",
     "weibo": "微博视频",
     "douyin": "抖音视频",
+    "douyin_live": "抖音直播",
     "tiktok": "TikTok 视频",
     "facebook": "Facebook 视频",
     "spotify": "Spotify 音乐",
@@ -3162,6 +3211,28 @@ class Engine:
             pass
 
     # ---- API actions --------------------------------------------------------
+    def _wechat_download_opts(self, url):
+        """Build aria2 options for a WeChat Channels CDN URL."""
+        from urllib.parse import urlparse, unquote
+
+        parsed = urlparse(url)
+        filename = unquote(os.path.basename(parsed.path)).strip()
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
+        if not filename:
+            filename = "wechat_video_%d" % int(time.time())
+        if not filename.lower().endswith(".mp4"):
+            filename += ".mp4"
+        return {
+            "dir": self.save_path,
+            "max-connection-per-server": str(self.connections),
+            "split": str(self.connections),
+            "header": [
+                f"User-Agent: {HTTP_UA}",
+                "Referer: https://finder.video.qq.com/",
+            ],
+            "out": filename,
+        }
+
     def add(self, url):
         # 迅雷链接解码为真实 URL
         if url.strip().lower().startswith("thunder://"):
@@ -3174,13 +3245,22 @@ class Engine:
         # ed2k links: search for matching magnet/torrent
         if t == "ed2k":
             return self._convert_ed2k(url)
+        if t == "wechat_video":
+            gid = self.aria.add(url, self._wechat_download_opts(url))
+            self.tasks[gid] = {
+                "type": t, "url": url, "submitted": True,
+                "picked": False, "pending": False, "added_at": time.time(),
+            }
+            return {"ok": True, "gid": gid, "type": t}
         # YouTube/X links: use yt-dlp to extract info for preview
         if t == "yt_media":
             return self._extract_yt_info(url)
+        if t == "douyin_live":
+            return _extract_douyin_live_info(url)
         # All yt-dlp supported platforms (微博/抖音/TikTok/Facebook/Spotify/etc)
         yt_dlp_types = {"weibo", "douyin", "tiktok", "facebook", "spotify",
                         "netease", "kuaishou", "xiaohongshu", "ixigua",
-                        "mgtv", "iqiyi", "tencent", "vimeo"}
+                        "mgtv", "iqiyi", "tencent", "vimeo", "loom"}
         if t in yt_dlp_types:
             result = self._extract_yt_info(url)
             if result and result.get("ok"):
@@ -3447,7 +3527,9 @@ class Engine:
         opts = {"dir": self.save_path,
                 "max-connection-per-server": str(self.connections),
                 "split": str(self.connections)}
-        if t == "http":
+        if t == "wechat_video":
+            opts = self._wechat_download_opts(url)
+        elif t == "http":
             from urllib.parse import urlparse
             _parsed = urlparse(url)
             _referer = f"{_parsed.scheme}://{_parsed.netloc}/" if _parsed.scheme else ""
@@ -3864,7 +3946,8 @@ class Engine:
                 if gid not in existing:
                     existing.add(gid)
                     self.records["history"].insert(0, {
-                        "gid": gid, "type": "m3u8", "name": info.get('title', '视频下载'),
+                        "gid": gid, "type": info.get('type', 'm3u8'),
+                        "name": info.get('title', '视频下载'),
                         "url": info.get('url', ''), "dir": self.save_path,
                         "paths": [output] if output else [],
                         "size": info.get('size', 0), "completed_at": int(time.time()),
@@ -3874,7 +3957,8 @@ class Engine:
             # 错误 → 保留在任务列表，不自动归档
             items.append({
                 "gid": gid,
-                "type": "m3u8",
+                "type": info.get('type', 'm3u8'),
+                "is_live": info.get('is_live', False),
                 "name": info.get('title', '视频下载'),
                 "state": info.get('state', 'downloading'),
                 "progress": info.get('progress', 0),
@@ -4226,7 +4310,8 @@ class Engine:
         except Exception:
             return None
 
-    def _download_m3u8_thread(self, gid, m3u8_url, title, resume_from=0):
+    def _download_m3u8_thread(self, gid, m3u8_url, title, resume_from=0,
+                              task_type='m3u8', is_live=False):
         """在后台线程中运行 ffmpeg 下载 m3u8 流。resume_from>0 表示续传。"""
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or "视频"
         output_path = os.path.join(self.save_path, f"{safe_title}.mp4")
@@ -4268,12 +4353,13 @@ class Engine:
             'proc': None, '_last_size': 0, '_last_time': time.time(), '_smooth_rate': 0,
             'resume_from': resume_from, 'part1': output_path if is_resume else None,
             'part2': actual_output if is_resume else None,
+            'type': task_type, 'is_live': is_live,
             'added_at': old_info.get('added_at') or time.time(),
         }
         self.m3u8_tasks[gid] = info
 
-        # 探测时长（仅对真正的 m3u8；直链返回 None，且不会下载整部影片）
-        duration = self._get_m3u8_duration(m3u8_url)
+        # 直播没有固定总时长；跳过探测，避免把当前播放列表误当成完整时长。
+        duration = None if is_live else self._get_m3u8_duration(m3u8_url)
         info['duration'] = duration
         if duration and resume_from:
             info['progress'] = resume_from / duration * 100
@@ -4330,6 +4416,9 @@ class Engine:
 
             proc.wait()
 
+            if gid not in self.m3u8_tasks:
+                return
+
             # 如果是用户暂停杀进程，不覆盖状态
             if gid in self.m3u8_tasks and self.m3u8_tasks[gid].get('state') == 'paused':
                 return
@@ -4362,7 +4451,8 @@ class Engine:
             self.m3u8_tasks[gid]['state'] = 'error'
             self.m3u8_tasks[gid]['error'] = str(e)
 
-    def start_m3u8_download(self, m3u8_url, title, paused=False):
+    def start_m3u8_download(self, m3u8_url, title, paused=False,
+                            task_type='m3u8', is_live=False):
         """启动 m3u8 流媒体下载。paused=True 时仅创建任务不开始下载。"""
         m3u8_url = _sanitize_video_url(m3u8_url)
         gid = f"m3u8_{self._m3u8_counter}"
@@ -4376,13 +4466,32 @@ class Engine:
                 'download_rate': 0, 'current_time': 0, 'duration': None,
                 'proc': None, '_last_size': 0, '_last_time': time.time(),
                 '_smooth_rate': 0, 'resume_from': 0, 'part1': None, 'part2': None,
+                'type': task_type, 'is_live': is_live,
                 'added_at': time.time(),
             }
         else:
             t = threading.Thread(target=self._download_m3u8_thread,
-                                 args=(gid, m3u8_url, title), daemon=True)
+                                 args=(gid, m3u8_url, title),
+                                 kwargs={'task_type': task_type, 'is_live': is_live},
+                                 daemon=True)
             t.start()
         return gid
+
+    @staticmethod
+    def _stop_ffmpeg(proc):
+        """Stop ffmpeg cleanly so a live MP4 gets its trailer written."""
+        import signal
+        try:
+            if IS_WINDOWS:
+                proc.terminate()
+            else:
+                proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=8)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def stop_m3u8_download(self, gid, skip_trash=False):
         """停止 m3u8 下载，保留部分文件并归档到回收站。"""
@@ -4390,14 +4499,12 @@ class Engine:
             info = self.m3u8_tasks[gid]
             proc = info.get('proc')
             if proc:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                self._stop_ffmpeg(proc)
             if not skip_trash:
                 output = info.get('output', '')
                 self.records["trash"].insert(0, {
-                    "gid": gid, "type": "m3u8", "name": info.get('title', '视频下载'),
+                    "gid": gid, "type": info.get('type', 'm3u8'),
+                    "name": info.get('title', '视频下载'),
                     "url": info.get('url', ''), "dir": self.save_path,
                     "paths": [output] if output and os.path.exists(output) else [],
                     "size": info.get('size', 0), "completed_at": int(time.time()),
@@ -4420,11 +4527,10 @@ class Engine:
         if gid in self.m3u8_tasks:
             info = self.m3u8_tasks[gid]
             proc = info.get('proc')
+            if info.get('is_live'):
+                return False
             if proc:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                self._stop_ffmpeg(proc)
             info['state'] = 'paused'
             info['proc'] = None
             return True
@@ -4434,13 +4540,18 @@ class Engine:
         """续传 m3u8 下载：从上次中断位置继续。"""
         if gid in self.m3u8_tasks:
             info = self.m3u8_tasks[gid]
+            if info.get('is_live'):
+                return False
             if info.get('state') not in ('paused', 'error'):
                 return False
             url = info.get('url', '')
             title = info.get('title', '视频下载')
             resume_from = info.get('current_time', 0)
             t = threading.Thread(target=self._download_m3u8_thread,
-                                 args=(gid, url, title, resume_from), daemon=True)
+                                 args=(gid, url, title, resume_from),
+                                 kwargs={'task_type': info.get('type', 'm3u8'),
+                                         'is_live': info.get('is_live', False)},
+                                 daemon=True)
             t.start()
             return True
         return False
@@ -4607,6 +4718,10 @@ class Engine:
             ext = f.get('ext', '') or ''
             vcodec = f.get('vcodec', '') or ''
             acodec = f.get('acodec', '') or ''
+            if not vcodec and f.get('video_ext') == 'none':
+                vcodec = 'none'
+            if not acodec and f.get('audio_ext') == 'none':
+                acodec = 'none'
             filesize = f.get('filesize') or f.get('filesize_approx') or 0
             vbr = f.get('vbr') or 0
             abr = f.get('abr') or 0
@@ -4681,7 +4796,9 @@ class Engine:
         # Determine if URL is YouTube or X
         is_youtube = bool(re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', url.lower()))
         is_x = bool(re.match(r'https?://(www\.)?(x\.com|twitter\.com|t\.co)/', url.lower()))
-        platform = 'YouTube' if is_youtube else ('X/Twitter' if is_x else '视频平台')
+        platform = 'YouTube' if is_youtube else (
+            'X/Twitter' if is_x else ('Loom' if classify(url) == 'loom' else '视频平台')
+        )
 
         return {
             "ok": True,
@@ -4707,6 +4824,14 @@ class Engine:
     def _download_yt_thread(self, gid, url, format_id, title, stream_data=None):
         """Download YouTube/X video in background thread using yt-dlp."""
         import yt_dlp
+        log.info(
+            "[_download_yt_thread] yt-dlp runtime version=%s path=%s ffmpeg=%s"
+            % (
+                getattr(getattr(yt_dlp, "version", None), "__version__", "unknown"),
+                getattr(yt_dlp, "__file__", "unknown"),
+                _FFMPEG,
+            )
+        )
 
         safe_title = re.sub(r'[<>:"/\\|?*]', '_', title).strip() or '视频'
         output_template = os.path.join(self.save_path, f"{safe_title}.%(ext)s")
@@ -4874,6 +4999,10 @@ class Engine:
             'overwrites': not self.yt_tasks.get(gid, {}).get('_resuming', False),
             'continuedl': True,
         }
+        # GUI launches do not inherit Homebrew's PATH. Point yt-dlp at the
+        # binary already resolved for the app's other ffmpeg-based downloads.
+        if _FFMPEG and os.path.isfile(_FFMPEG):
+            ydl_opts['ffmpeg_location'] = _FFMPEG
         # Never merge more than one audio stream: a combined format (video+audio)
         # plus a stray "bestaudio" would otherwise pick up a dubbed track and embed
         # a second (wrong-language) audio stream. yt-dlp's default is already False,
@@ -5895,12 +6024,338 @@ engine = Engine()
 engine._apply_settings()
 
 
+class WeChatMacCapture:
+    """Manage the macOS mitmproxy capture process and its local API."""
+
+    def __init__(self):
+        self.proc = None
+        self.started_at = None
+        self.last_error = ""
+        self.log_path = os.path.join(DATA_DIR, "wechat_capture.log")
+        self.http = requests.Session()
+        self.http.trust_env = False
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _mitmdump_path():
+        sibling = os.path.join(os.path.dirname(sys.executable), "mitmdump")
+        if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+            return sibling
+        return _find_binary("mitmdump")
+
+    @staticmethod
+    def _wasm_ready():
+        required = ("wasm_video_decode.js", "wasm_video_decode.wasm")
+        return all(os.path.isfile(os.path.join(WECHAT_WASM_DIR, name)) for name in required)
+
+    @staticmethod
+    def _cert_path():
+        return os.path.join(os.path.expanduser("~"), ".mitmproxy", "mitmproxy-ca-cert.pem")
+
+    @staticmethod
+    def _login_keychain_path():
+        path = os.path.join(
+            os.path.expanduser("~"), "Library", "Keychains", "login.keychain-db"
+        )
+        return path if os.path.isfile(path) else ""
+
+    @staticmethod
+    def _cert_installed():
+        cert_path = WeChatMacCapture._cert_path()
+        keychain = WeChatMacCapture._login_keychain_path()
+        if not os.path.isfile(cert_path) or not keychain:
+            return False
+        try:
+            result = subprocess.run(
+                ["security", "find-certificate", "-c", "mitmproxy", "-p", keychain],
+                capture_output=True, text=True, timeout=3,
+            )
+            return result.returncode == 0 and "BEGIN CERTIFICATE" in result.stdout
+        except Exception:
+            return False
+
+    @staticmethod
+    def _port_available(port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                return True
+            except OSError:
+                return False
+
+    def _dependencies(self):
+        mitmdump = self._mitmdump_path()
+        node = _find_binary("node")
+        cert_path = self._cert_path()
+        return {
+            "mitmdump": bool(mitmdump and os.path.isfile(mitmdump)),
+            "mitmdump_path": mitmdump or "",
+            "node": bool(node and os.path.isfile(node)),
+            "node_path": node or "",
+            "wasm": self._wasm_ready(),
+            "wasm_dir": WECHAT_WASM_DIR,
+            "cert_file": os.path.isfile(cert_path),
+            "cert_installed": self._cert_installed(),
+            "cert_path": cert_path,
+        }
+
+    def _api_url(self, path):
+        return "http://127.0.0.1:%d%s" % (WECHAT_CAPTURE_PORT, path)
+
+    def _capture_api(self, path):
+        response = self.http.get(self._api_url(path), timeout=2)
+        response.raise_for_status()
+        return response.json()
+
+    def _log_tail(self, limit=1200):
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()[-limit:]
+        except OSError:
+            return ""
+
+    def status(self):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+            data = {
+                "ok": True,
+                "running": running,
+                "started_at": self.started_at,
+                "last_error": self.last_error,
+                "log_path": self.log_path,
+                "capture_port": WECHAT_CAPTURE_PORT,
+                "proxy_port": WECHAT_PROXY_PORT,
+                "dependencies": self._dependencies(),
+            }
+
+        if not running:
+            return data
+
+        try:
+            data["capture"] = self._capture_api("/api/state")
+            videos = self._capture_api("/api/videos")
+            data["videos"] = videos.get("videos", [])
+            tasks = self._capture_api("/api/tasks")
+            data["tasks"] = tasks.get("tasks", [])
+        except Exception as e:
+            data["capture_error"] = "捕获服务尚未就绪：%s" % e
+        return data
+
+    def prepare(self):
+        node = _find_binary("node")
+        if not node:
+            return {"ok": False, "error": "未找到 Node.js，请先安装 Node.js 20 或更高版本"}
+        if not os.path.isfile(WECHAT_WASM_FETCHER):
+            return {"ok": False, "error": "缺少微信解密组件下载脚本"}
+
+        env = os.environ.copy()
+        env["WX_WASM_ASSETS"] = WECHAT_WASM_DIR
+        try:
+            result = subprocess.run(
+                [node, WECHAT_WASM_FETCHER],
+                env=env, capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "下载微信解密组件超时"}
+        except Exception as e:
+            return {"ok": False, "error": "下载微信解密组件失败：%s" % e}
+
+        output = (result.stdout or "") + (result.stderr or "")
+        return {
+            "ok": result.returncode == 0 and self._wasm_ready(),
+            "error": "" if result.returncode == 0 else output[-1200:],
+            "output": output[-2000:],
+            "dependencies": self._dependencies(),
+        }
+
+    def selftest(self):
+        node = _find_binary("node")
+        if not node:
+            return {"ok": False, "error": "未找到 Node.js"}
+        if not self._wasm_ready():
+            return {"ok": False, "error": "微信解密组件尚未下载"}
+        env = os.environ.copy()
+        env["WX_WASM_ASSETS"] = WECHAT_WASM_DIR
+        try:
+            result = subprocess.run(
+                [node, WECHAT_DECRYPTOR, "selftest", "--json"],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+            payload = json.loads(result.stdout or "{}")
+        except Exception as e:
+            return {"ok": False, "error": "解密自检失败：%s" % e}
+        payload["ok"] = result.returncode == 0 and payload.get("ok", True)
+        return payload
+
+    def start(self):
+        with self.lock:
+            if self.proc is not None and self.proc.poll() is None:
+                return {"ok": True, "already_running": True}
+
+            deps = self._dependencies()
+            missing = []
+            if not deps["mitmdump"]:
+                missing.append("mitmproxy")
+            if not deps["node"]:
+                missing.append("Node.js")
+            if not deps["wasm"]:
+                missing.append("微信解密组件")
+            if missing:
+                return {"ok": False, "error": "缺少：%s" % "、".join(missing)}
+            if not self._port_available(WECHAT_CAPTURE_PORT):
+                return {"ok": False, "error": "本地端口 %d 被占用" % WECHAT_CAPTURE_PORT}
+            if not self._port_available(WECHAT_PROXY_PORT):
+                return {"ok": False, "error": "本地代理端口 %d 被占用" % WECHAT_PROXY_PORT}
+
+            video_dir = os.path.join(engine.save_path, "WeChatChannels")
+            os.makedirs(video_dir, exist_ok=True)
+            env = os.environ.copy()
+            env.update({
+                "WX_CAPTURE_FILE": os.path.join(DATA_DIR, "wechat-captures.jsonl"),
+                "WX_VIDEO_DIR": video_dir,
+                "WX_SAVE_VIDEO": "off",
+                "WX_AUTO_FETCH": "0",
+                "WX_AUTO_DECRYPT": "1",
+                "WX_NODE_PATH": deps["node_path"],
+                "WX_CAPTURE_HOST": "127.0.0.1",
+                "WX_CAPTURE_PORT": str(WECHAT_CAPTURE_PORT),
+                "WX_PROXY_PORT": str(WECHAT_PROXY_PORT),
+                "WX_WASM_ASSETS": WECHAT_WASM_DIR,
+            })
+            if deps["node_path"]:
+                env["PATH"] = os.path.dirname(deps["node_path"]) + os.pathsep + env.get("PATH", "")
+
+            try:
+                log_handle = open(self.log_path, "ab", buffering=0)
+            except OSError as e:
+                return {"ok": False, "error": "无法写入捕获日志：%s" % e}
+
+            try:
+                self.proc = subprocess.Popen(
+                    [deps["mitmdump_path"], "-s", WECHAT_CAPTURE_SCRIPT,
+                     "--listen-host", "127.0.0.1", "--listen-port", str(WECHAT_PROXY_PORT)],
+                    cwd=BASE_DIR, env=env, stdout=log_handle,
+                    stderr=subprocess.STDOUT, start_new_session=True,
+                )
+            finally:
+                log_handle.close()
+
+            self.started_at = time.time()
+            self.last_error = ""
+
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if self.proc is None or self.proc.poll() is not None:
+                with self.lock:
+                    self.last_error = self._log_tail() or "mitmdump 已退出"
+                    self.proc = None
+                    self.started_at = None
+                return {"ok": False, "error": "捕获进程启动失败", "log": self.last_error}
+            try:
+                self._capture_api("/api/state")
+                return self.status()
+            except Exception:
+                time.sleep(0.25)
+
+        return {
+            "ok": True,
+            "starting": True,
+            "status": self.status(),
+        }
+
+    def stop(self):
+        with self.lock:
+            proc = self.proc
+            self.proc = None
+            self.started_at = None
+        if proc is None or proc.poll() is not None:
+            return {"ok": True}
+
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
+        return {"ok": True}
+
+    def open_certificate(self):
+        cert_path = self._cert_path()
+        if not os.path.isfile(cert_path):
+            return {"ok": False, "error": "mitmproxy 证书尚未生成，请先启动一次捕获"}
+        keychain = self._login_keychain_path()
+        if not keychain:
+            return {"ok": False, "error": "未找到 login 钥匙串"}
+
+        if self._cert_installed():
+            try:
+                subprocess.Popen(["open", "-a", "Keychain Access"])
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "already_installed": True,
+                "path": cert_path,
+                "keychain": keychain,
+                "instructions": "证书已在 login 钥匙串中。请在钥匙串访问里把 mitmproxy CA 的 SSL 信任设为「始终信任」。",
+            }
+
+        try:
+            result = subprocess.run(
+                ["security", "import", cert_path, "-k", keychain, "-t", "cert"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception as e:
+            return {"ok": False, "error": "导入 login 钥匙串失败：%s" % e}
+        if result.returncode != 0:
+            detail = result.stderr or result.stdout or "security error %d" % result.returncode
+            return {"ok": False, "error": "导入 login 钥匙串失败：%s" % detail.strip()}
+
+        try:
+            subprocess.Popen(["open", "-a", "Keychain Access"])
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "imported": True,
+            "path": cert_path,
+            "keychain": keychain,
+            "instructions": "已导入 login 钥匙串。请在钥匙串访问里把 mitmproxy CA 的 SSL 信任设为「始终信任」。",
+        }
+
+    def download(self, file_key, quality="best"):
+        with self.lock:
+            running = self.proc is not None and self.proc.poll() is None
+        if not running:
+            return {"ok": False, "error": "捕获服务未运行"}
+        url = self._api_url("/api/videos/%s/download" % quote(file_key, safe=""))
+        try:
+            response = self.http.post(url, json={"quality": quality}, timeout=5)
+            payload = response.json()
+            response.raise_for_status()
+            return payload
+        except Exception as e:
+            return {"ok": False, "error": "启动微信视频下载失败：%s" % e}
+
+
+_wechat_mac_capture = WeChatMacCapture()
+atexit.register(_wechat_mac_capture.stop)
+
+
 # --------------------------------------------------------------------------- #
 #  Routes
 # --------------------------------------------------------------------------- #
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", is_windows=IS_WINDOWS, is_macos=IS_MACOS)
 
 
 @app.route("/api/status")
@@ -6108,17 +6563,115 @@ def api_parse():
     return jsonify(result)
 
 
+@app.route("/api/wechat_capture", methods=["POST"])
+def api_wechat_capture():
+    """Capture a WeChat Channels video URL from desktop WeChat memory."""
+    if not IS_WINDOWS:
+        return jsonify(ok=False, error="微信视频号抓取仅支持 Windows 桌面版微信")
+    try:
+        from wechat_finder import find_wechat_video_urls
+        urls = find_wechat_video_urls()
+    except Exception as e:
+        log.warning("[API /api/wechat_capture] failed: %s" % str(e)[:200])
+        return jsonify(ok=False, error="抓取微信视频号链接失败：%s" % e)
+
+    if not urls:
+        return jsonify(
+            ok=False,
+            error="未找到视频号链接。请先在 Windows 桌面版微信中打开要下载的视频，再点击抓取。",
+        )
+
+    url = urls[0]
+    filename = os.path.basename(urlparse(url).path)
+    return jsonify(ok=True, url=url, urls=urls, title=filename or "微信视频号视频")
+
+
+@app.route("/api/wechat_mac/status")
+def api_wechat_mac_status():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.status())
+
+
+@app.route("/api/wechat_mac/prepare", methods=["POST"])
+def api_wechat_mac_prepare():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.prepare())
+
+
+@app.route("/api/wechat_mac/selftest", methods=["POST"])
+def api_wechat_mac_selftest():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.selftest())
+
+
+@app.route("/api/wechat_mac/start", methods=["POST"])
+def api_wechat_mac_start():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.start())
+
+
+@app.route("/api/wechat_mac/stop", methods=["POST"])
+def api_wechat_mac_stop():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.stop())
+
+
+@app.route("/api/wechat_mac/open_certificate", methods=["POST"])
+def api_wechat_mac_open_certificate():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    return jsonify(_wechat_mac_capture.open_certificate())
+
+
+@app.route("/api/wechat_mac/download", methods=["POST"])
+def api_wechat_mac_download():
+    if not IS_MACOS:
+        return jsonify(ok=False, error="此接口仅支持 macOS")
+    data = request.get_json(force=True)
+    file_key = str(data.get("file_key", "")).strip()
+    quality = str(data.get("quality", "best")).strip() or "best"
+    if not file_key:
+        return jsonify(ok=False, error="缺少视频标识"), 400
+    return jsonify(_wechat_mac_capture.download(file_key, quality))
+
+
 @app.route("/api/download_m3u8", methods=["POST"])
 def api_download_m3u8():
-    """启动 m3u8 流媒体下载。"""
+    """启动 m3u8/直播流媒体下载。"""
     data = request.get_json(force=True)
     url = data.get("url", "").strip()
     title = data.get("title", "").strip()
     paused = data.get("paused", False)
+    task_type = data.get("type", "m3u8")
+    if task_type not in ("m3u8", "douyin_live"):
+        task_type = "m3u8"
     if not url:
         return jsonify(ok=False, error="请输入 m3u8 地址"), 400
-    gid = engine.start_m3u8_download(url, title or "视频下载", paused=paused)
-    return jsonify(ok=True, gid=gid, type="m3u8")
+    is_live = task_type == "douyin_live"
+    if is_live and paused:
+        return jsonify(ok=False, error="直播流地址会过期，不能加入队列暂停录制"), 400
+    gid = engine.start_m3u8_download(
+        url, title or "视频下载", paused=paused,
+        task_type=task_type, is_live=is_live,
+    )
+    return jsonify(ok=True, gid=gid, type=task_type)
+
+
+@app.route("/api/douyin_live_info", methods=["POST"])
+def api_douyin_live_info():
+    """解析抖音直播间，返回可录制的 HLS/FLV 地址。"""
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify(ok=False, error="请输入抖音直播间链接"), 400
+    if classify(url) != "douyin_live":
+        return jsonify(ok=False, error="不是抖音直播间链接"), 400
+    return jsonify(_extract_douyin_live_info(url))
 
 
 @app.route("/api/download_yt", methods=["POST"])

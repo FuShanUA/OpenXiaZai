@@ -1,15 +1,15 @@
 #!/bin/bash
 # OpenXiaZai 启动脚本
-# 用法: ./start.sh  （macOS 优先启动打包后的 .app，其他系统走 venv）
+# 用法: ./start.sh  （优先运行当前源码，避免旧 dist 应用缺少新功能）
 cd "$(dirname "$0")"
-if [[ "$OSTYPE" == "darwin"* && -d "dist/OpenXiaZai.app" ]]; then
-  open "dist/OpenXiaZai.app"
-  exit 0
-fi
 if [ -f ".venv/bin/python3" ]; then
   .venv/bin/python3 launcher.py
 elif [ -f "venv/bin/python3" ]; then
   venv/bin/python3 launcher.py
 else
-  python3 launcher.py
+  if [[ "$OSTYPE" == "darwin"* && -d "dist/OpenXiaZai.app" ]]; then
+    open "dist/OpenXiaZai.app"
+  else
+    python3 launcher.py
+  fi
 fi

@@ -14,5 +14,8 @@ dist/
 *.exe
 *.pkg
 *.log
+*.mp4
+vendor/
+wechat-captures*.jsonl
 m3u8_tasks.json
 yt_tasks.json

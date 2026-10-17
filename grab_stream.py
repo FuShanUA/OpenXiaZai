@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""独立抓流脚本：在子进程中用 Playwright 拦截爱奇艺/腾讯视频的播放器请求。
+"""独立抓流脚本：在子进程中用 Playwright 拦截爱奇艺/腾讯视频/抖音直播的播放器请求。
 与主进程隔离，Playwright 崩溃/卡顿不会影响 Flask 服务。
 用法: python grab_stream.py <platform> <url>
-platform: iqiyi | tencent
+platform: iqiyi | tencent | douyin | douyin_live
 输出: 一行 JSON 到 stdout，随后 os._exit 强制退出（避免 browser.close 卡住）。"""
 import sys, json, os
 
@@ -109,6 +109,126 @@ def grab_tencent(url):
     except Exception:
         st['cookies'] = []
     return st
+
+
+def _collect_live_streams(value, out, prefix=''):
+    """Walk Douyin page/API JSON and collect HLS/FLV playback URLs."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = (prefix + '.' + key).lstrip('.')
+            if isinstance(child, str) and child.startswith(('http://', 'https://')):
+                low = child.lower()
+                is_hls = ('hls' in key.lower() or 'm3u8' in key.lower() or '.m3u8' in low)
+                is_flv = ('flv' in key.lower() or '.flv' in low)
+                if is_hls or is_flv:
+                    label = 'HLS' if is_hls else 'FLV'
+                    if 'hd' in key.lower() or 'hd' in path.lower():
+                        label += ' 高清'
+                    elif 'sd' in key.lower() or 'sd' in path.lower():
+                        label += '标清'
+                    out.append((label, child))
+            else:
+                _collect_live_streams(child, out, path)
+    elif isinstance(value, list):
+        for i, child in enumerate(value):
+            _collect_live_streams(child, out, f'{prefix}.{i}')
+
+
+def grab_douyin_live(url):
+    """Douyin live extraction: render the room and capture its playback API/requests."""
+    import re as _re
+
+    p, b, ctx = _launch()
+    page = ctx.new_page()
+    st = {'error': None, 'streams': [], 'title': '', 'poster': '', 'uploader': '',
+          'room_status': None}
+
+    def current_room(payload):
+        data = payload.get('data', {}) or {}
+        rooms = data.get('data', []) or []
+        if isinstance(rooms, list):
+            return rooms[0] if rooms else {}
+        if isinstance(rooms, dict):
+            return rooms
+        return {}
+
+    def on_response(resp):
+        u = resp.url
+        low = u.lower()
+        if '.m3u8' in low:
+            st['streams'].append(('HLS', u))
+        elif '.flv' in low:
+            st['streams'].append(('FLV', u))
+        elif '/webcast/room/web/enter/' in low:
+            try:
+                data = json.loads(resp.text())
+                room = current_room(data)
+                st['room_status'] = room.get('status')
+                if room.get('title'):
+                    st['title'] = room['title']
+                user = (data.get('data', {}) or {}).get('user', {}) or {}
+                if user.get('nickname'):
+                    st['uploader'] = user['nickname']
+                # similar_rooms also carries playback URLs. Ignore them so a
+                # stopped room cannot be replaced by a recommended room.
+                _collect_live_streams(room, st['streams'], 'room')
+            except Exception:
+                pass
+
+    page.on('response', on_response)
+    try:
+        page.goto(url, wait_until='domcontentloaded', timeout=20000)
+        page.wait_for_timeout(5000)
+        try:
+            page.click('canvas, [class*=play], [class*=player], [class*=container]', timeout=2500)
+        except Exception:
+            pass
+        page.wait_for_timeout(8000)
+
+        try:
+            title_el = page.query_selector('meta[property="og:title"]')
+            poster_el = page.query_selector('meta[property="og:image"]')
+            title = title_el.get_attribute('content') if title_el else ''
+            poster = poster_el.get_attribute('content') if poster_el else ''
+        except Exception:
+            title, poster = '', ''
+        st['title'] = (title or page.title() or '').strip()
+        st['poster'] = poster
+    except Exception as e:
+        st['error'] = 'page: ' + str(e)[:120]
+
+    # Prefer HLS: ffmpeg can remux an HLS live event to MP4 without re-encoding.
+    unique = {}
+    for label, stream_url in st['streams']:
+        clean = stream_url.replace('\\u002F', '/').replace('\\/', '/')
+        if clean not in unique:
+            unique[clean] = label
+    hls = [(u, label) for u, label in unique.items() if '.m3u8' in u.lower() or label.startswith('HLS')]
+    flv = [(u, label) for u, label in unique.items() if u not in dict(hls)]
+    chosen = hls[0][0] if hls else (flv[0][0] if flv else '')
+    if not chosen:
+        if st.get('room_status') not in (None, 2):
+            st['error'] = '直播间当前不可播放（状态 %s）' % st.get('room_status')
+        else:
+            st['error'] = st.get('error') or '未捕获到当前直播间流，直播间可能已结束、需要登录或触发风控验证'
+        return st
+
+    formats = []
+    for stream_url, label in (hls + flv):
+        stream_type = 'HLS' if stream_url in dict(hls) else 'FLV'
+        formats.append({
+            'format_id': 'douyin_live_' + stream_type.lower(),
+            'label': label,
+            'url': stream_url,
+        })
+    return {
+        'title': st.get('title') or '抖音直播',
+        'poster': st.get('poster', ''),
+        'uploader': st.get('uploader', ''),
+        'm3u8_url': chosen,
+        'formats': formats,
+        'is_live': True,
+    }
 
 
 
@@ -218,6 +338,8 @@ if __name__ == '__main__':
             r = grab_tencent(url)
         elif platform == 'douyin':
             r = grab_douyin(url)
+        elif platform == 'douyin_live':
+            r = grab_douyin_live(url)
         else:
             r = {'error': 'unknown platform: ' + platform}
         sys.stdout.write(json.dumps(r, ensure_ascii=False) + '\n')

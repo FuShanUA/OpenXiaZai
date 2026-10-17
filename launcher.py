@@ -20,7 +20,7 @@ if sys.platform == "win32" and sys.stdout is None:
     sys.stderr = open(os.path.join(_log_dir, "openxiazai_stderr.log"), "w", encoding="utf-8")
 
 import webview
-from app import app, engine, DEFAULT_SAVE
+from app import app, engine, DEFAULT_SAVE, _wechat_mac_capture
 
 # Capture any uncaught exceptions so the window doesn't silently vanish
 import faulthandler, traceback as _tb
@@ -63,6 +63,10 @@ def _serve():
 def _cleanup():
     try:
         engine.shutdown()
+    except Exception:
+        pass
+    try:
+        _wechat_mac_capture.stop()
     except Exception:
         pass
 
