@@ -4393,17 +4393,26 @@ class Engine:
         ]
         if resume_from > 0:
             cmd += ['-ss', str(resume_from)]
+        # Live recordings can be interrupted at any moment. A fragmented MP4
+        # keeps its index in every fragment, so it remains playable even if
+        # Windows has to terminate ffmpeg without a normal shutdown.
+        movflags = ('+frag_keyframe+empty_moov+default_base_moof'
+                    if is_live else '+faststart')
         cmd += [
             '-i', m3u8_url,
             '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
-            '-movflags', '+faststart',
+            '-movflags', movflags,
             '-progress', 'pipe:1', '-nostats', '-loglevel', 'error',
             actual_output
         ]
 
         try:
+            popen_kwargs = {}
+            if IS_WINDOWS:
+                # CTRL_BREAK_EVENT can only be delivered to a process group.
+                popen_kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True, bufsize=1)
+                                    text=True, bufsize=1, **popen_kwargs)
             self.m3u8_tasks[gid]['proc'] = proc
 
             for line in proc.stdout:
@@ -4507,10 +4516,13 @@ class Engine:
         import signal
         try:
             if IS_WINDOWS:
-                proc.terminate()
+                try:
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                except Exception:
+                    proc.terminate()
             else:
                 proc.send_signal(signal.SIGINT)
-            proc.wait(timeout=8)
+            proc.wait(timeout=10)
         except Exception:
             try:
                 proc.kill()

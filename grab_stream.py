@@ -214,7 +214,23 @@ def grab_douyin_live(url):
             unique[clean] = label
     hls = [(u, label) for u, label in unique.items() if '.m3u8' in u.lower() or label.startswith('HLS')]
     flv = [(u, label) for u, label in unique.items() if u not in dict(hls)]
-    chosen = hls[0][0] if hls else (flv[0][0] if flv else '')
+
+    def codec_rank(stream_url):
+        low = stream_url.lower()
+        if 'vcodec=h264' in low or 'codec=h264' in low:
+            return 0
+        if 'vcodec=h265' in low or 'vcodec=hevc' in low:
+            return 2
+        return 1
+
+    hls.sort(key=lambda item: codec_rank(item[0]))
+    flv.sort(key=lambda item: codec_rank(item[0]))
+    if hls and (not flv or codec_rank(hls[0][0]) <= codec_rank(flv[0][0])):
+        chosen = hls[0][0]
+    elif flv:
+        chosen = flv[0][0]
+    else:
+        chosen = ''
     if not chosen:
         if st.get('room_status') not in (None, 2):
             st['error'] = '直播间当前不可播放（状态 %s）' % st.get('room_status')
