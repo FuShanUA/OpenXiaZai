@@ -346,11 +346,20 @@ def _decode_thunder(url):
         return None
 
 
+def _clean_pasted_url(text):
+    """Extract one URL from pasted text, including Markdown links."""
+    text = str(text or "").strip()
+    md = re.search(r'\[[^\]]+\]\((https?://[^\s)]+)\)', text, re.IGNORECASE)
+    if md:
+        return md.group(1)
+    m = re.search(r'https?://[^\s"<>\']+', text, re.IGNORECASE)
+    url = m.group(0) if m else text
+    return url.rstrip(')]>,.;，。、')
+
+
 def classify(url):
     # 从分享文本中提取真实 URL（抖音/快手/小红书 App 分享带口令前缀）
-    m = re.search(r'https?://[^\s"<>\']+', url)
-    if m:
-        url = m.group(0)
+    url = _clean_pasted_url(url)
     u = url.strip().lower()
     if u.startswith("magnet:"):
         return "torrent"
@@ -1321,17 +1330,26 @@ def _grab_stream_subprocess(platform, url):
     """调用 grab_stream.py 子进程抓流，返回解析后的 dict 或 None。
     子进程隔离避免 Playwright 崩溃影响 Flask 主进程。"""
     # 从分享文本中提取纯 URL（抖音/快手等 App 分享带口令前缀）
-    m = re.search(r'https?://[^\s"<>\']+', url)
-    if m:
-        url = m.group(0)
+    url = _clean_pasted_url(url)
     _cleanup_chromium()
-    script = os.path.join(BASE_DIR, 'grab_stream.py')
+    if getattr(sys, 'frozen', False):
+        helper = _find_binary('grab_stream')
+        if not helper:
+            log.error("[%s] packaged grab_stream helper is missing" % platform)
+            return {"error": "打包版缺少抓流组件，请重新构建或更新应用"}
+        command = [helper, platform, url]
+    else:
+        script = os.path.join(BASE_DIR, 'grab_stream.py')
+        if not os.path.isfile(script):
+            log.error("[%s] grab_stream.py is missing: %s" % (platform, script))
+            return {"error": "源码目录缺少 grab_stream.py"}
+        command = [sys.executable, script, platform, url]
     try:
         # 用 Popen + start_new_session 而非 subprocess.run：chromium 孙进程会继承
         # pipe fd 导致 communicate() 卡死等不到 EOF。start_new_session 让子进程独立
         # 成会话，轮询读 stdout 拿到结果后 killpg 杀整个进程组（含 chromium）。
         proc = subprocess.Popen(
-            [sys.executable, script, platform, url],
+            command,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             **({'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
                else {'start_new_session': True, 'close_fds': True}))
@@ -1383,6 +1401,7 @@ def _grab_stream_subprocess(platform, url):
 
 def _extract_douyin_live_info(url):
     """Extract a Douyin live playback URL in an isolated Playwright subprocess."""
+    url = _clean_pasted_url(url)
     st = _grab_stream_subprocess('douyin_live', url)
     if not st:
         return {
@@ -1390,10 +1409,15 @@ def _extract_douyin_live_info(url):
             "hint": "请确认直播间正在开播，然后重试。",
         }
     if st.get('error'):
+        error = st['error']
+        hint = "请确认直播间正在开播；如页面要求登录或验证，请先在浏览器中打开一次。"
+        low = error.lower()
+        if ("executable" in low and "exist" in low) or "playwright install" in low:
+            hint = "未找到 Playwright 浏览器。源码运行请执行 python -m playwright install chromium；打包版会尝试使用系统 Edge/Chrome。"
         return {
-            "ok": False, "error": "抖音直播解析失败: " + st['error'],
+            "ok": False, "error": "抖音直播解析失败: " + error,
             "type": "douyin_live", "url": url,
-            "hint": "请确认直播间正在开播；如页面要求登录或验证，请先在浏览器中打开一次。",
+            "hint": hint,
         }
     stream_url = st.get('m3u8_url') or ''
     if not stream_url:
@@ -4494,25 +4518,36 @@ class Engine:
                 pass
 
     def stop_m3u8_download(self, gid, skip_trash=False):
-        """停止 m3u8 下载，保留部分文件并归档到回收站。"""
+        """停止 m3u8 下载；直播录制保留文件并归档到下载记录。"""
         if gid in self.m3u8_tasks:
             info = self.m3u8_tasks[gid]
             proc = info.get('proc')
             if proc:
                 self._stop_ffmpeg(proc)
-            if not skip_trash:
-                output = info.get('output', '')
+            output = info.get('output', '')
+            size = os.path.getsize(output) if output and os.path.exists(output) else info.get('size', 0)
+            if info.get('is_live') and not skip_trash:
+                # A manually stopped live recording is still a usable file.
+                # Archive it as completed instead of treating it as discarded.
+                self.records["history"].insert(0, {
+                    "gid": gid, "type": info.get('type', 'douyin_live'),
+                    "name": info.get('title', '抖音直播'),
+                    "url": info.get('url', ''), "dir": self.save_path,
+                    "paths": [output] if output and os.path.exists(output) else [],
+                    "size": size, "completed_at": int(time.time()),
+                })
+                self._save_records()
+            elif not skip_trash:
                 self.records["trash"].insert(0, {
                     "gid": gid, "type": info.get('type', 'm3u8'),
                     "name": info.get('title', '视频下载'),
                     "url": info.get('url', ''), "dir": self.save_path,
                     "paths": [output] if output and os.path.exists(output) else [],
-                    "size": info.get('size', 0), "completed_at": int(time.time()),
+                    "size": size, "completed_at": int(time.time()),
                 })
                 self._save_records()
             else:
                 # 跳过回收站时删除部分文件
-                output = info.get('output', '')
                 if output and os.path.exists(output):
                     try:
                         os.remove(output)
@@ -6973,14 +7008,27 @@ def api_open_folder():
     """在文件管理器中打开下载目录。"""
     data = request.get_json(force=True)
     path = data.get("path", engine.save_path)
+    if not path:
+        path = engine.save_path
+    path = os.path.abspath(os.path.expanduser(str(path)))
+    if not os.path.exists(path):
+        return jsonify(ok=False, error="路径不存在: " + path)
     try:
         if IS_WINDOWS:
-            # explorer /select,"path" reveals the file in Explorer
-            subprocess.Popen(['explorer', '/select,', path])
+            path = os.path.normpath(path)
+            if os.path.isdir(path):
+                subprocess.Popen(['explorer', path])
+            else:
+                # explorer /select,"path" reveals the file in Explorer
+                subprocess.Popen(['explorer', '/select,', path])
         elif IS_MACOS:
-            subprocess.Popen(["open", "-R", path])
+            if os.path.isdir(path):
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["open", "-R", path])
         else:
-            subprocess.Popen(["xdg-open", os.path.dirname(path) or path])
+            target = path if os.path.isdir(path) else (os.path.dirname(path) or path)
+            subprocess.Popen(["xdg-open", target])
         return jsonify(ok=True)
     except Exception as e:
         return jsonify(ok=False, error=str(e))

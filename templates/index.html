@@ -507,8 +507,11 @@ $('url').addEventListener('input',()=>{
 
 // 从分享文本中提取真实 URL（抖音/快手/小红书等 App 分享会带口令前缀）
 function extractUrl(text){
+  const md=text.match(/\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/i);
+  if(md)return md[1];
   const m=text.match(/https?:\/\/[^\s，。、"'<>]+/i);
-  return m?m[0]:text;
+  const url=m?m[0]:text;
+  return url.replace(/[)\]>,.;，。、]+$/,'');
 }
 
 // 判断 URL 是否为直接文件下载（不走视频提取）
@@ -1914,7 +1917,9 @@ $('pauseAllBtn').onclick=async()=>{
 };
 $('deleteAllBtn').onclick=async()=>{
   if(!cur||!cur.tasks.length)return;
-  if(!await customConfirm('确定要删除全部下载任务吗？任务将移至回收站。',{danger:true}))return;
+  const hasLive=cur.tasks.some(t=>t.is_live);
+  const message=hasLive?'确定要停止全部任务吗？直播录制会保留并移入下载记录，其他任务移至回收站。':'确定要删除全部下载任务吗？任务将移至回收站。';
+  if(!await customConfirm(message,{danger:true}))return;
   for(const t of [...cur.tasks]){
     await post('/api/stop',{gid:t.gid});
   }
@@ -2006,10 +2011,13 @@ function renderTask(t){
   el.querySelector('[data-act=resume]')?.addEventListener('click',()=>post('/api/resume',{gid:t.gid}));
   el.querySelector('[data-act=retry]')?.addEventListener('click',async()=>{const r=await post('/api/retry',{gid:t.gid});if(r&&r.ok){poll();}else if(r&&r.error){await customAlert('重试失败: '+r.error);}});
   el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{
-    const message=liveRecording?'停止录制？已录制部分会保留并移入回收站。':'删除此任务？将移至回收站。';
+    const message=liveRecording?'停止录制？已录制部分会保留并移入下载记录。':'删除此任务？将移至回收站。';
     if(await customConfirm(message,{title:liveRecording?'停止录制':'删除任务',okText:liveRecording?'停止录制':'删除',danger:true}))await post('/api/stop',{gid:t.gid})
   });
-  el.querySelector('[data-act=openDir]')?.addEventListener('click',()=>post('/api/open_folder',{path:t.dir||''}));
+  el.querySelector('[data-act=openDir]')?.addEventListener('click',async()=>{
+    const r=await post('/api/open_folder',{path:t.dir||''});
+    if(r&&!r.ok)await customAlert(r.error||'打开文件夹失败');
+  });
   // File list toggle
   el.querySelector('.files-toggle')?.addEventListener('click',function(){
     this.classList.toggle('open');
@@ -2030,8 +2038,9 @@ function renderHistory(r){
   const openBtn=document.createElement('button');
   openBtn.innerHTML='📂';openBtn.title='打开文件夹';openBtn.style=btnStyle;
   openBtn.onclick=async()=>{
-    const path=r.dir?(r.dir+'/'+r.name):(r.paths&&r.paths[0]?r.paths[0]:'');
-    await post('/api/open_folder',{path:path||r.dir});
+    const path=(r.paths&&r.paths[0])||r.dir||'';
+    const res=await post('/api/open_folder',{path});
+    if(res&&!res.ok)await customAlert(res.error||'打开文件夹失败');
   };
   el.appendChild(openBtn);
   // Play button

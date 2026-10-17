@@ -136,7 +136,9 @@ Windows 版沿用桌面微信进程内存中的视频号直链扫描。先在微
 
 ### 抖音直播
 
-粘贴 `https://live.douyin.com/<room_id>` 直播间链接后点击「添加下载」。应用会用 Playwright 打开直播间，拦截 HLS 或 FLV 播放地址，再交给 ffmpeg 直接复制流并保存为 MP4。直播没有固定时长，需要手动点击任务卡片上的「停止录制」；停止后已录制文件会保留在下载目录，任务记录进入回收站。
+粘贴 `https://live.douyin.com/<room_id>` 直播间链接后点击「添加下载」。应用会用 Playwright 打开直播间，拦截 HLS 或 FLV 播放地址，再交给 ffmpeg 直接复制流并保存为 MP4。直播没有固定时长，需要手动点击任务卡片上的「停止录制」；停止后已录制文件会保留在下载目录，任务记录进入下载记录。
+
+打包版内置独立的 `grab_stream` 抓流程序。若本机没有 Playwright Chromium，会依次尝试系统 Edge 和 Chrome；Windows 重新打包时运行 `python build.py win`。
 
 ### 打包
 

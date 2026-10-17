@@ -71,6 +71,26 @@ def find_binary(name):
     return None
 
 
+def build_grab_stream_helper():
+    """Build the isolated Playwright stream-grabbing executable."""
+    out_dir = os.path.join(BUILD, "grab_stream_helper")
+    work_dir = os.path.join(BUILD, "grab_stream_helper_work")
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(work_dir, exist_ok=True)
+    subprocess.check_call([
+        sys.executable, "-m", "PyInstaller",
+        "--clean", "--onefile", "--name", "grab_stream",
+        "--distpath", out_dir, "--workpath", work_dir,
+        "--specpath", work_dir, "--noconfirm",
+        os.path.join(ROOT, "grab_stream.py"),
+    ])
+    helper = os.path.join(out_dir, "grab_stream.exe" if sys.platform == "win32" else "grab_stream")
+    if not os.path.isfile(helper):
+        raise RuntimeError("grab_stream helper build failed")
+    print(f"  grab_stream helper -> {helper}")
+    return helper
+
+
 def build_mac():
     print("=" * 50)
     print("  构建 macOS .app + .dmg")
@@ -95,13 +115,14 @@ def build_mac():
     if not node or not mitmdump:
         print("提示: .app 不内置 Node.js 和 mitmdump；如需 macOS 视频号捕获，请运行 brew install node mitmproxy")
 
-    bundled_binaries = [f"('{aria2}', '.')"]
+    clean()
+    grab_stream_helper = build_grab_stream_helper()
+
+    bundled_binaries = [f"('{aria2}', '.')", f"('{grab_stream_helper}', '.')"]
     if ffmpeg:
         bundled_binaries.append(f"('{ffmpeg}', '.')")
     if ffprobe:
         bundled_binaries.append(f"('{ffprobe}', '.')")
-
-    clean()
 
     # 生成 spec 文件
     spec = f"""# -*- mode: python ; coding: utf-8 -*-
@@ -268,6 +289,7 @@ def build_win():
         print("警告: 未找到 ffprobe.exe，yt-dlp 元数据处理可能受限")
 
     clean()
+    grab_stream_helper = build_grab_stream_helper()
 
     # Pre-convert all paths to forward slashes to avoid backslash escaping in spec
     _launcher = os.path.join(ROOT, "launcher.py").replace("\\", "/")
@@ -279,7 +301,10 @@ def build_win():
     _ffmpeg = ffmpeg.replace("\\", "/") if ffmpeg else None
     _ffprobe = ffprobe.replace("\\", "/") if ffprobe else None
 
-    binaries = [f"('{_aria2}', '.')"]
+    binaries = [
+        f"('{_aria2}', '.')",
+        f"('{grab_stream_helper.replace(chr(92), '/')}', '.')",
+    ]
     if _ffmpeg:
         binaries.append(f"('{_ffmpeg}', '.')")
     if _ffprobe:
@@ -295,6 +320,7 @@ a = Analysis(
     datas=[
         ('{_templates}', 'templates'),
         ('{_static}', 'static'),
+        ('{os.path.join(ROOT, "grab_stream.py").replace(chr(92), "/")}', '.'),
     ],
     hiddenimports=['flask', 'webview', 'requests', 'werkzeug', 'jinja2', 'markupsafe', 'yt_dlp', 'playwright', 'proxy_tools', 'wechat_finder'],
     hookspath=[],

@@ -17,12 +17,21 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
 def _launch():
     from playwright.sync_api import sync_playwright
     p = sync_playwright().start()
-    b = p.chromium.launch(headless=True, args=[
+    args = [
         "--disable-blink-features=AutomationControlled", "--no-first-run",
         "--no-default-browser-check", "--disable-dev-shm-usage",
-        "--no-sandbox", "--no-proxy-server"])
-    ctx = b.new_context(user_agent=_UA)
-    return p, b, ctx
+        "--no-sandbox", "--no-proxy-server"]
+    last_error = None
+    # PyInstaller packages do not install Playwright's Chromium copy. Windows
+    # normally has Edge and many machines have Chrome, so use them as fallbacks.
+    for options in ({}, {"channel": "msedge"}, {"channel": "chrome"}):
+        try:
+            b = p.chromium.launch(headless=True, args=args, **options)
+            ctx = b.new_context(user_agent=_UA)
+            return p, b, ctx
+        except Exception as e:
+            last_error = e
+    raise last_error
 
 
 def grab_iqiyi(url):
