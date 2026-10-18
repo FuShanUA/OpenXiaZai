@@ -20,7 +20,7 @@ if sys.platform == "win32" and sys.stdout is None:
     sys.stderr = open(os.path.join(_log_dir, "openxiazai_stderr.log"), "w", encoding="utf-8")
 
 import webview
-from app import app, engine, DEFAULT_SAVE, _wechat_mac_capture
+from app import APP_BUILD, app, engine, DEFAULT_SAVE, _wechat_mac_capture
 
 
 def allow_autoplay_in_wkwebview():
@@ -143,7 +143,7 @@ def main():
     allow_autoplay_in_wkwebview()
     webview.create_window(
         "OpenXiaZai",
-        f"http://127.0.0.1:{PORT}/",
+        f"http://127.0.0.1:{PORT}/?v={APP_BUILD}",
         width=1120,
         height=780,
         min_size=(900, 600),

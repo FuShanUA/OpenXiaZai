@@ -119,9 +119,11 @@ def _find_binary(name):
 
 # Pre-resolve binary paths for subprocess calls (bundled or system)
 _FFMPEG = _find_binary("ffmpeg")
+_FFPROBE = _find_binary("ffprobe")
 _ARIA2C = _find_binary("aria2c")
 WECHAT_CAPTURE_SCRIPT = os.path.join(BASE_DIR, "wechat_capture", "mitmproxy_wechat_capture.py")
 WECHAT_WASM_FETCHER = os.path.join(BASE_DIR, "wechat_capture", "decrypt", "fetch_wasm_assets.mjs")
+APP_BUILD = "20261018-05"
 WECHAT_DECRYPTOR = os.path.join(BASE_DIR, "wechat_capture", "decrypt", "wechat_video_decrypt.mjs")
 WECHAT_WASM_DIR = os.path.join(DATA_DIR, "vendor", "wechat_files", "raw")
 WECHAT_CAPTURE_PORT = 8765
@@ -3778,6 +3780,8 @@ class Engine:
             "state": task.get("state", "queued"),
             "progress": task.get("percent") or 0,
             "size": task.get("total") or 0,
+            "total_size": task.get("total") or 0,
+            "metadata_size": task.get("metadata_size") or 0,
             "completed_size": task.get("received") or 0,
             "download_rate": task.get("speed") or 0,
             "output": task.get("output") or "",
@@ -3805,10 +3809,13 @@ class Engine:
             info = self.wechat_tasks[gid]
             task = statuses.get(info.get("inner_id"))
             if task:
+                total = task.get("total") or info.get("total_size") or 0
                 info.update({
                     "state": task.get("state", info.get("state")),
                     "progress": task.get("percent") or 0,
-                    "size": task.get("total") or 0,
+                    "size": total,
+                    "total_size": total,
+                    "metadata_size": task.get("metadata_size") or info.get("metadata_size") or 0,
                     "completed_size": task.get("received") or 0,
                     "download_rate": task.get("speed") or 0,
                     "output": task.get("output") or info.get("output") or "",
@@ -3835,6 +3842,8 @@ class Engine:
                         "dir": os.path.dirname(output) if output else self.save_path,
                         "paths": [output] if output else [],
                         "size": info.get("size", 0),
+                        "total_size": info.get("total_size", info.get("size", 0)),
+                        "metadata_size": info.get("metadata_size", 0),
                         "completed_at": int(time.time()),
                     })
                     self._save_records()
@@ -3847,6 +3856,8 @@ class Engine:
                 "state": state,
                 "progress": info.get("progress", 0),
                 "size": info.get("size", 0),
+                "total_size": info.get("total_size") or 0,
+                "metadata_size": info.get("metadata_size") or 0,
                 "completed_size": info.get("completed_size", 0),
                 "download_rate": info.get("download_rate", 0),
                 "upload_rate": 0,
@@ -3855,7 +3866,7 @@ class Engine:
                 "dir": os.path.dirname(output) if output else self.save_path,
                 "files": [],
                 "paths": [output] if output else [],
-                "url": info.get("file_key", ""),
+                "url": info.get("url", ""),
                 "has_metadata": True,
                 "metadata_progress": 0,
                 "added_at": info.get("added_at", 0),
@@ -3949,6 +3960,7 @@ class Engine:
                 "state": state_map.get(st, st),
                 "progress": round(100 * done / total, 1) if total else 0,
                 "size": total,
+                "total_size": total,
                 "completed_size": done,
                 "download_rate": int(s.get("downloadSpeed", 0) or 0),
                 "upload_rate": int(s.get("uploadSpeed", 0) or 0),
@@ -4094,6 +4106,7 @@ class Engine:
                 "state": info.get('state', 'downloading'),
                 "progress": info.get('progress', 0),
                 "size": info.get('size', 0),
+                "total_size": info.get('total_size'),
                 "completed_size": info.get('size', 0),
                 "download_rate": info.get('download_rate', 0),
                 "upload_rate": 0,
@@ -4148,6 +4161,7 @@ class Engine:
                 "state": state,
                 "progress": pct,
                 "size": total,
+                "total_size": total,
                 "completed_size": downloaded,
                 "download_rate": info.get('download_rate', 0),
                 "upload_rate": 0,
@@ -4189,6 +4203,7 @@ class Engine:
                 "state": state,
                 "progress": pct,
                 "size": info.get('size', 0),
+                "total_size": info.get('total_size') or info.get('size', 0),
                 "completed_size": 0,
                 "download_rate": info.get('download_rate', 0),
                 "upload_rate": 0,
@@ -4226,6 +4241,7 @@ class Engine:
                 "state": state,
                 "progress": info.get('progress', 0),
                 "size": info.get('size', 0),
+                "total_size": info.get('_total_size') or info.get('size', 0),
                 "completed_size": info.get('completed_size', 0),
                 "download_rate": 0,
                 "upload_rate": 0,
@@ -4388,17 +4404,11 @@ class Engine:
             pass
 
     # ---- m3u8/HLS 流媒体下载 (ffmpeg) ----
-    def _get_m3u8_duration(self, m3u8_url):
-        """通过解析 m3u8 播放列表中的 EXTINF 标签来计算总时长（秒）。
-        支持主播放列表（master playlist）递归解析。
-        仅对真正的 m3u8 链接生效；直链视频文件直接返回 None，避免把整部影片下载进内存。"""
-        # 非 m3u8 直链（mp4/mkv 等）：EXTINF 解析不适用，直接返回 None。
-        # 否则 requests.get 会把整个媒体文件拉进内存（几百 MB→GB），把下载线程卡死。
+    def _fetch_playlist_text(self, m3u8_url):
+        """限量读取播放列表文本；非 m3u8 直链返回 None，避免把整部影片拉进内存。"""
         if '.m3u8' not in m3u8_url.lower().split('#')[0]:
             return None
         try:
-            # stream + 限量读取：m3u8 播放列表是纯文本且很小，只读前 256KB；
-            # 即便链接被误判为 m3u8 也不会吞下海量数据。
             r = requests.get(m3u8_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10, stream=True)
             chunks = []
             total = 0
@@ -4414,33 +4424,73 @@ class Engine:
                         break
             finally:
                 r.close()
-            text = ''.join(chunks)
-            # 检查是否为主播放列表（包含 EXT-X-STREAM-INF）
-            if '#EXT-X-STREAM-INF' in text:
-                # 取第一个（通常最高码率）变体播放列表
-                from urllib.parse import urljoin
-                best_bandwidth = 0
-                best_url = None
-                for line in text.split('\n'):
-                    if line.startswith('#EXT-X-STREAM-INF'):
-                        bw_match = re.search(r'BANDWIDTH=(\d+)', line)
-                        bw = int(bw_match.group(1)) if bw_match else 0
-                        if bw > best_bandwidth:
-                            best_bandwidth = bw
-                    elif best_bandwidth > 0 and line.strip() and not line.startswith('#'):
-                        best_url = urljoin(m3u8_url, line.strip())
-                        break
-                if best_url:
-                    return self._get_m3u8_duration(best_url)
-                return None
-            total = 0.0
-            for line in text.split('\n'):
-                if line.startswith('#EXTINF:'):
-                    dur = line.split(':')[1].split(',')[0]
-                    total += float(dur)
-            return total if total > 0 else None
+            return ''.join(chunks)
         except Exception:
             return None
+
+    def _get_m3u8_media_info(self, m3u8_url):
+        """解析播放列表元数据：总时长（秒）与所选变体的 BANDWIDTH（bit/s）。
+        支持主播放列表（master playlist）递归解析；直链视频返回 None。"""
+        text = self._fetch_playlist_text(m3u8_url)
+        if not text:
+            return None
+        if '#EXT-X-STREAM-INF' in text:
+            from urllib.parse import urljoin
+            pending_bw = 0
+            for line in text.split('\n'):
+                line = line.strip()
+                if line.startswith('#EXT-X-STREAM-INF'):
+                    bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                    pending_bw = int(bw_match.group(1)) if bw_match else 0
+                elif pending_bw > 0 and line and not line.startswith('#'):
+                    info = self._get_m3u8_media_info(urljoin(m3u8_url, line))
+                    if info and pending_bw:
+                        info['bandwidth'] = pending_bw
+                    return info
+            return None
+        duration = 0.0
+        for line in text.split('\n'):
+            if line.startswith('#EXTINF:'):
+                try:
+                    duration += float(line.split(':')[1].split(',')[0])
+                except (ValueError, IndexError):
+                    continue
+        if duration <= 0:
+            return None
+        return {'duration': duration, 'bandwidth': 0}
+
+    def _get_m3u8_duration(self, m3u8_url):
+        info = self._get_m3u8_media_info(m3u8_url)
+        return info['duration'] if info else None
+
+    def _probe_m3u8_total_size(self, m3u8_url, duration=None):
+        """VOD HLS 的总大小：播放列表元数据 BANDWIDTH x 时长。
+
+        ffprobe 对 HLS URL 返回的 format.size 是播放列表文件本身的字节数
+        （几十到几百 B），不是媒体大小，绝不能用作总大小。
+        """
+        info = self._get_m3u8_media_info(m3u8_url) or {}
+        bandwidth = info.get('bandwidth') or 0
+        total_duration = duration or info.get('duration') or 0
+        if bandwidth and total_duration:
+            return int(bandwidth * total_duration / 8)
+        if not _FFPROBE or not total_duration:
+            return None
+        try:
+            result = subprocess.run(
+                [_FFPROBE, "-v", "error", "-show_entries", "format=bit_rate",
+                 "-of", "json", m3u8_url],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return None
+            fmt = (json.loads(result.stdout or "{}") or {}).get("format") or {}
+            bit_rate = fmt.get("bit_rate")
+            if bit_rate and str(bit_rate).replace('.', '', 1).isdigit():
+                return int(float(bit_rate) * float(total_duration) / 8)
+        except Exception:
+            return None
+        return None
 
     def _download_m3u8_thread(self, gid, m3u8_url, title, resume_from=0,
                               task_type='m3u8', is_live=False):
@@ -4481,6 +4531,7 @@ class Engine:
             'url': m3u8_url, 'title': title, 'output': output_path,
             'state': 'downloading', 'progress': 0,
             'size': 0, 'download_rate': 0,
+            'total_size': None,
             'current_time': resume_from, 'duration': None,
             'proc': None, '_last_size': 0, '_last_time': time.time(), '_smooth_rate': 0,
             'resume_from': resume_from, 'part1': output_path if is_resume else None,
@@ -4493,6 +4544,7 @@ class Engine:
         # 直播没有固定总时长；跳过探测，避免把当前播放列表误当成完整时长。
         duration = None if is_live else self._get_m3u8_duration(m3u8_url)
         info['duration'] = duration
+        info['total_size'] = None if is_live else self._probe_m3u8_total_size(m3u8_url, duration)
         if duration and resume_from:
             info['progress'] = resume_from / duration * 100
 
@@ -4585,7 +4637,10 @@ class Engine:
                 self.m3u8_tasks[gid]['state'] = 'finished'
                 self.m3u8_tasks[gid]['progress'] = 100
                 if os.path.exists(output_path):
-                    self.m3u8_tasks[gid]['size'] = os.path.getsize(output_path)
+                    final_size = os.path.getsize(output_path)
+                    self.m3u8_tasks[gid]['size'] = final_size
+                    if not self.m3u8_tasks[gid].get('total_size'):
+                        self.m3u8_tasks[gid]['total_size'] = final_size
             else:
                 self.m3u8_tasks[gid]['state'] = 'error'
         except Exception as e:
@@ -4604,6 +4659,7 @@ class Engine:
             self.m3u8_tasks[gid] = {
                 'url': m3u8_url, 'title': title, 'output': output_path,
                 'state': 'paused', 'progress': 0, 'size': 0,
+                'total_size': None,
                 'download_rate': 0, 'current_time': 0, 'duration': None,
                 'proc': None, '_last_size': 0, '_last_time': time.time(),
                 '_smooth_rate': 0, 'resume_from': 0, 'part1': None, 'part2': None,
@@ -6623,7 +6679,14 @@ atexit.register(_wechat_mac_capture.stop)
 # --------------------------------------------------------------------------- #
 @app.route("/")
 def index():
-    return render_template("index.html", is_windows=IS_WINDOWS, is_macos=IS_MACOS)
+    response = Response(render_template(
+        "index.html",
+        is_windows=IS_WINDOWS,
+        is_macos=IS_MACOS,
+        app_build=APP_BUILD,
+    ), headers={"Cache-Control": "no-store, max-age=0"})
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @app.route("/api/status")
@@ -6971,6 +7034,42 @@ def api_download_m3u8():
     return jsonify(ok=True, gid=gid, type=task_type)
 
 
+@app.route("/api/m3u8_info", methods=["POST"])
+def api_m3u8_info():
+    """播放列表元数据：时长与 BANDWIDTH x 时长 推算的总大小。"""
+    data = request.get_json(force=True)
+    url = str(data.get("url", "")).strip()
+    if not url:
+        return jsonify(ok=False, error="缺少地址"), 400
+    info = engine._get_m3u8_media_info(url) or {}
+    duration = info.get("duration") or 0
+    total = engine._probe_m3u8_total_size(url, duration)
+    return jsonify(ok=True, duration=duration, total_size=total or 0)
+
+
+@app.route("/api/lookup_name", methods=["POST"])
+def api_lookup_name():
+    """按 URL 在下载记录/回收站/活动任务里找回最近用过的资源名。"""
+    data = request.get_json(force=True)
+    url = str(data.get("url", "")).strip()
+    if not url:
+        return jsonify(ok=False, error="缺少地址"), 400
+    name = ""
+    for group in ("history", "trash"):
+        for rec in engine.records.get(group, []):
+            if rec.get("url") == url and rec.get("name"):
+                name = rec["name"]
+                break
+        if name:
+            break
+    if not name:
+        for info in list(engine.m3u8_tasks.values()):
+            if info.get("url") == url and info.get("title"):
+                name = info["title"]
+                break
+    return jsonify(ok=True, name=name)
+
+
 @app.route("/api/douyin_live_info", methods=["POST"])
 def api_douyin_live_info():
     """解析抖音直播间，返回可录制的 HLS/FLV 地址。"""
@@ -7275,6 +7374,31 @@ def api_clipboard():
         return jsonify(text=r.stdout)
     except Exception as e:
         return jsonify(text="", error=str(e))
+
+
+@app.route("/api/clipboard/write", methods=["POST"])
+def api_clipboard_write():
+    """Write text to the system clipboard from the embedded web view."""
+    data = request.get_json(force=True)
+    text = str(data.get("text", ""))
+    log.info("[clipboard/write] len=%d", len(text))
+    try:
+        if IS_WINDOWS:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "$input | Set-Clipboard"],
+                input=text, text=True, timeout=3, check=True,
+            )
+        elif IS_MACOS:
+            subprocess.run(["pbcopy"], input=text, text=True, timeout=3, check=True)
+        else:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text, text=True, timeout=3, check=True,
+            )
+        return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e))
 
 
 @app.route("/api/open_folder", methods=["POST"])

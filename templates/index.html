@@ -201,7 +201,7 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
 <div class="wrap">
   <header>
     <div class="logo">⬇</div>
-    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X · B站 · 微博 · 抖音 · TikTok · Facebook · Spotify · Loom · 微信视频号</div></div>
+    <div><h1>OpenXiaZai</h1><div class="sub">magnet · torrent · HTTP · FTP · ed2k · 种子文件 · YouTube · X · B站 · 微博 · 抖音 · TikTok · Facebook · Spotify · Loom · 微信视频号 · Build {{ app_build }}</div></div>
     <div style="flex:1"></div>
     <button class="btn sm" id="settingsBtn" title="设置" style="font-size:22px;padding:4px 8px">⚙</button>
   </header>
@@ -227,11 +227,13 @@ code.dir{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#8ab4ff;w
         <div id="cxTitle" style="font-weight:600;font-size:15px;margin-bottom:6px"></div>
         <div id="cxMagnet" style="font-size:11px;color:var(--muted);word-break:break-all;margin-bottom:4px;display:none"></div>
         <div id="cxM3u8" style="font-size:11px;color:var(--accent);word-break:break-all"></div>
+        <div id="cxMeta" style="font-size:11px;color:var(--muted);margin-top:4px;display:none"></div>
       </div>
     </div>
     <div class="row" style="margin-top:12px;gap:8px">
       <button class="btn go" id="cxDownload">立即下载</button>
       <button class="btn" id="cxQueue">加入队列</button>
+      <button class="btn" id="cxCopy">复制链接</button>
       <button class="btn" id="cxCancel">取消</button>
     </div>
   </div>
@@ -443,6 +445,10 @@ async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Cont
 function esc(s){return (s||'').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]))}
 async function copyText(text){
   if(!text)return false;
+  try{
+    const r=await post('/api/clipboard/write',{text});
+    if(r&&r.ok)return true;
+  }catch(e){}
   try{
     await navigator.clipboard.writeText(text);
     return true;
@@ -1006,7 +1012,7 @@ function renderWechatMac(data){
           detail='下载完成，正在解密…';
         }else if(task.state==='downloading'){
           detail=[
-            (task.received_human||fmtB(task.received))+' / '+(task.total_human||(task.total?fmtB(task.total):'未知')),
+            (task.received_human||fmtB(task.received))+' / '+((task.metadata_size||task.total)?fmtB(task.metadata_size||task.total):'未知'),
             task.speed?fmtR(task.speed):'',
             task.eta_seconds!=null?'剩余 '+fmtTime(task.eta_seconds):''
           ].filter(Boolean).join(' · ');
@@ -1018,13 +1024,20 @@ function renderWechatMac(data){
         return '<div class="wx-task">'+
           '<div class="wx-task-top"><span>'+esc(state)+'</span><span class="name">'+esc(title+' · '+(task.label||task.quality))+'</span><span>'+esc(pct)+'</span></div>'+
           '<div class="bar"><i style="width:'+Number(progress).toFixed(1)+'%"></i></div>'+
-          '<div class="wx-task-meta">'+esc(detail)+'</div>'+
+          '<div class="wx-task-meta">'+esc(detail)+(task.url?' <button class="btn sm" data-copy-url="'+esc(task.url)+'">复制链接</button>':'')+'</div>'+
           '</div>';
       }).join('');
   }else{
     taskBox.innerHTML='';
   }
 }
+$('wxTasks').addEventListener('click',async e=>{
+  const btn=e.target.closest('[data-copy-url]');
+  if(!btn)return;
+  const ok=await copyText(btn.dataset.copyUrl);
+  btn.textContent=ok?'已复制':'复制失败';
+  setTimeout(()=>{btn.textContent='复制链接'},1200);
+});
 $('wechatBtn').onclick=async()=>{
   if(IS_MACOS){
     openWechatMacModal();
@@ -1243,6 +1256,29 @@ function showCxPreview(data){
   }
   if(data.poster){$('cxPoster').src=data.poster;$('cxPoster').style.display=''}
   else{$('cxPoster').style.display='none'}
+  $('cxMeta').style.display='none';
+  // 裸 m3u8/直链没有页面元数据：用播放列表元数据补大小/时长，用历史记录补资源名
+  if(data.type==='direct'&&data.m3u8_url){
+    (async()=>{
+      try{
+        const info=await post('/api/m3u8_info',{url:data.m3u8_url});
+        if(info&&info.ok&&(info.total_size||info.duration)){
+          const parts=[];
+          if(info.total_size)parts.push('大小: '+fmtB(info.total_size));
+          if(info.duration)parts.push('时长: '+fmtTime(Math.round(info.duration)));
+          $('cxMeta').textContent=parts.join(' · ');
+          $('cxMeta').style.display='';
+        }
+      }catch(e){}
+      try{
+        const lk=await post('/api/lookup_name',{url:data.m3u8_url});
+        if(lk&&lk.ok&&lk.name){
+          cxData.title=lk.name;
+          $('cxTitle').textContent=lk.name;
+        }
+      }catch(e){}
+    })();
+  }
   $('cxPreview').style.display='block';
   $('url').value='';$('typeHint').style.display='none';
 }
@@ -1266,6 +1302,14 @@ async function doCxAdd(action){
 }
 $('cxDownload').onclick=async()=>{await doCxAdd('download')};
 $('cxQueue').onclick=async()=>{await doCxAdd('queue')};
+$('cxCopy').onclick=async()=>{
+  const text=cxData&&(cxData.m3u8_url||cxData.magnet||cxData.url);
+  if(!text)return;
+  const ok=await copyText(text);
+  const b=$('cxCopy');const old=b.textContent;
+  b.textContent=ok?'已复制':'失败';
+  setTimeout(()=>{b.textContent=old},1200);
+};
 $('cxCancel').onclick=hideCxPreview;
 
 // ---- 通用直链/磁力/种子/M3U8 预览浮窗（直接下载 + 加入队列） ----
@@ -1307,6 +1351,19 @@ function showDirectPreview(data){
     const actions=card.querySelector('.row:last-child');
     card.insertBefore(select,actions);
   }
+  const copySrcBtn=document.createElement('button');
+  copySrcBtn.className='btn sm';
+  copySrcBtn.textContent='复制链接';
+  copySrcBtn.style.cssText='width:100%;margin-top:8px';
+  copySrcBtn.onclick=async()=>{
+    const text=data.m3u8_url||data.magnet||data.url;
+    if(!text)return;
+    const ok=await copyText(text);
+    const old=copySrcBtn.textContent;
+    copySrcBtn.textContent=ok?'已复制':'失败';
+    setTimeout(()=>{copySrcBtn.textContent=old},1200);
+  };
+  card.appendChild(copySrcBtn);
   const doAdd=async(paused)=>{
     if(data.is_live){
       const res=await post('/api/download_m3u8',{
@@ -2071,6 +2128,7 @@ function renderTask(t){
   const elapsed=t.added_at?Math.round(now-t.added_at):0;
   const progressValue=Number(t.progress||0);
   const pct=(Number.isFinite(progressValue)?progressValue:0).toFixed(1);
+  const totalSize=Number(t.metadata_size||t.total_size||0);
   const timeInfo=(t.added_at&&(t.state==='downloading'||t.state==='fetching'||t.state==='queued'))?
     '<span>⏱ '+fmtTime(elapsed)+'</span>'+((t.progress>0&&!t.is_live)?'<span>剩余 '+fmtETA(t.progress,elapsed)+'</span>':''):'';
   let html='<div class="top">'
@@ -2079,7 +2137,7 @@ function renderTask(t){
     +'<span class="name" title="'+esc(t.name)+'">'+esc(t.name)+'</span>'
     +'</div>'
     +'<div class="meta">'
-    +'<span>'+fmtB(t.size)+'</span>'
+    +'<span>'+(totalSize?fmtB(totalSize):'--')+'</span>'
     +'<span>'+fmtB(t.completed_size)+'</span>'
     +'<span>'+pct+'%</span>'
     +'<span style="display:inline-block;min-width:110px;font-variant-numeric:tabular-nums">'+fmtR(t.download_rate)+'</span>'

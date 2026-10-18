@@ -223,6 +223,7 @@ class DownloadTask:
     label: str = ""
     state: str = "queued"          # queued | downloading | decrypting | done | failed
     total: int | None = None
+    metadata_size: int | None = None
     received: int = 0
     error: str | None = None
     output: str | None = None
@@ -247,6 +248,8 @@ class DownloadTask:
         )
         data["received_human"] = human_size(self.received)
         data["total_human"] = human_size(self.total)
+        data["metadata_size"] = self.metadata_size
+        data["metadata_size_human"] = human_size(self.metadata_size)
         return data
 
 
@@ -319,6 +322,11 @@ class DownloadManager:
             raise KeyError(f"unknown file key {file_key!r}")
         with self.owner.state_lock:
             client_format = self.owner.client_formats.get(file_key, "")
+            media_file_size = media.get("fileSize") or media.get("file_size") or 0
+            try:
+                metadata_size = int(media_file_size) if media_file_size else None
+            except (TypeError, ValueError):
+                metadata_size = None
         suffix = quality_suffix(quality, client_format)
         stem = f"{file_key}{suffix}"
         # Resolve the probed size before taking the lock: _known_total() reads
@@ -341,6 +349,7 @@ class DownloadManager:
                 quality=quality,
                 label=quality if quality != "best" else "原片",
                 total=total,
+                metadata_size=metadata_size,
             )
             self.tasks[task.id] = task
             self.order.append(task.id)
