@@ -2069,17 +2069,19 @@ function renderTask(t){
   const el=document.createElement('div');el.className='task';
   const now=Date.now()/1000;
   const elapsed=t.added_at?Math.round(now-t.added_at):0;
+  const progressValue=Number(t.progress||0);
+  const pct=(Number.isFinite(progressValue)?progressValue:0).toFixed(1);
   const timeInfo=(t.added_at&&(t.state==='downloading'||t.state==='fetching'||t.state==='queued'))?
     '<span>⏱ '+fmtTime(elapsed)+'</span>'+((t.progress>0&&!t.is_live)?'<span>剩余 '+fmtETA(t.progress,elapsed)+'</span>':''):'';
   let html='<div class="top">'
     +'<span class="state-dot '+t.state+'"></span>'
     +'<span class="badge '+t.type+'">'+(TYPES[t.type]||t.type)+'</span>'
     +'<span class="name" title="'+esc(t.name)+'">'+esc(t.name)+'</span>'
-    +'<span class="pill">'+(t.is_live&&t.state==='downloading'?'录制中':(t.progress>0?t.progress.toFixed(0)+'%':t.size?fmtB(t.size):'--'))+'</span>'
     +'</div>'
     +'<div class="meta">'
     +'<span>'+fmtB(t.size)+'</span>'
-    +(t.completed_size>0&&t.state!=='finished'?'<span>'+fmtB(t.completed_size)+'</span>':'')
+    +'<span>'+fmtB(t.completed_size)+'</span>'
+    +'<span>'+pct+'%</span>'
     +'<span style="display:inline-block;min-width:110px;font-variant-numeric:tabular-nums">'+fmtR(t.download_rate)+'</span>'
     +(t.type==='torrent'?'<span style="display:inline-block;min-width:110px;font-variant-numeric:tabular-nums">↑ '+fmtR(t.upload_rate)+'</span>':'')
     +timeInfo
