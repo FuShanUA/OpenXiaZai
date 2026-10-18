@@ -78,6 +78,9 @@ input[type=text]:focus{border-color:var(--accent)}
 .task .name{flex:1;min-width:0;font-weight:500;font-size:13px;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .task .meta{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--muted);margin-top:7px;flex-wrap:wrap}
+.task .link-row{display:flex;align-items:center;gap:8px;margin-top:8px;min-width:0}
+.task .link-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent);font-size:12px;cursor:pointer}
+.task .link-text:hover{text-decoration:underline}
 .bar{height:6px;background:#1a1e28;border-radius:4px;overflow:hidden;margin-top:9px}
 .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
 .state-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
@@ -2084,6 +2087,9 @@ function renderTask(t){
     +'<span class="state-dot '+t.state+'"></span><span>'+({downloading:'下载中',paused:'已暂停',finished:'已完成',error:'错误',queued:'排队中',removed:'已移除',fetching:'获取中'})[t.state]||t.state+'</span>'
     +'</div>'
     +'<div class="bar"><i style="width:'+(t.progress||0)+'%"></i></div>';
+  if(t.url){
+    html+='<div class="link-row"><span class="link-text" title="'+esc(t.url)+'">'+esc(t.url)+'</span><button class="btn sm" data-act="copyUrl" data-g="'+t.gid+'">复制链接</button></div>';
+  }
   // Only show selected files, collapsed by default
   const selFiles=(t.files||[]).filter(f=>f.selected);
   const hasFiles=selFiles.length>0;
@@ -2122,7 +2128,6 @@ function renderTask(t){
     html+='<button class="btn sm go" data-act="retry" data-g="'+t.gid+'">重试</button>';
   }
   if(!liveRecording)html+='<button class="btn sm danger" data-act="stop" data-g="'+t.gid+'">删除</button>';
-  if(t.url)html+='<button class="btn sm" data-act="copyUrl" data-g="'+t.gid+'" title="'+esc(t.url)+'">🔗</button>';
   html+='<button class="btn sm" data-act="openDir" data-g="'+t.gid+'" title="'+esc(t.dir||'')+'">📂</button></div>';
   el.innerHTML=html;
   el.querySelector('[data-act=pause]')?.addEventListener('click',()=>post('/api/pause',{gid:t.gid}));
@@ -2136,6 +2141,10 @@ function renderTask(t){
       btn.textContent=ok?'✓':'!';
       setTimeout(()=>{btn.textContent=old},1200);
     }
+    if(!ok)await customAlert('复制链接失败',{title:'下载链接'});
+  });
+  el.querySelector('.link-text')?.addEventListener('click',async()=>{
+    const ok=await copyText(t.url);
     if(!ok)await customAlert('复制链接失败',{title:'下载链接'});
   });
   el.querySelector('[data-act=stop]')?.addEventListener('click',async()=>{
