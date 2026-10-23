@@ -22,6 +22,9 @@ from .downloads import human_size
 
 PROGRESS_INTERVAL = 0.25
 STOP_GRACE_SECONDS = 15
+LIVE_READ_TIMEOUT_US = 30_000_000
+LIVE_RECONNECT_MAX_RETRIES = 10
+LIVE_RECONNECT_DELAY_TOTAL_MAX = 60
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120 Safari/537.36 MicroMessenger/3.8.9"
@@ -242,9 +245,13 @@ class LiveRecordingManager:
             "-hide_banner",
             "-loglevel", "error",
             "-progress", "pipe:1",
+            "-rw_timeout", str(LIVE_READ_TIMEOUT_US),
             "-reconnect", "1",
             "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1",
             "-reconnect_delay_max", "5",
+            "-reconnect_max_retries", str(LIVE_RECONNECT_MAX_RETRIES),
+            "-reconnect_delay_total_max", str(LIVE_RECONNECT_DELAY_TOTAL_MAX),
             "-user_agent", USER_AGENT,
             "-i", task.url,
             "-map", "0:v:0",
